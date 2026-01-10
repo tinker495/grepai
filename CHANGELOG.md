@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-01-10
+
+### Added
+- **LM Studio Provider**: New local embedding provider using LM Studio
+  - Supports OpenAI-compatible API format
+  - Configurable endpoint and model selection
+  - Privacy-first alternative for local embeddings
+
 ## [0.3.0] - 2026-01-09
 
 ### Added
@@ -52,7 +60,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial public release
 
-[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/yoanbernabeu/grepai/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/yoanbernabeu/grepai/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/yoanbernabeu/grepai/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/yoanbernabeu/grepai/releases/tag/v0.1.0
