@@ -65,6 +65,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		ollamaEmb := embedder.NewOllamaEmbedder(
 			embedder.WithOllamaEndpoint(cfg.Embedder.Endpoint),
 			embedder.WithOllamaModel(cfg.Embedder.Model),
+			embedder.WithOllamaDimensions(cfg.Embedder.Dimensions),
 		)
 		// Test connection
 		if err := ollamaEmb.Ping(ctx); err != nil {
@@ -76,6 +77,8 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		emb, err = embedder.NewOpenAIEmbedder(
 			embedder.WithOpenAIModel(cfg.Embedder.Model),
 			embedder.WithOpenAIKey(cfg.Embedder.APIKey),
+			embedder.WithOpenAIEndpoint(cfg.Embedder.Endpoint),
+			embedder.WithOpenAIDimensions(cfg.Embedder.Dimensions),
 		)
 		if err != nil {
 			return fmt.Errorf("failed to initialize OpenAI embedder: %w", err)
@@ -84,6 +87,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		lmstudioEmb := embedder.NewLMStudioEmbedder(
 			embedder.WithLMStudioEndpoint(cfg.Embedder.Endpoint),
 			embedder.WithLMStudioModel(cfg.Embedder.Model),
+			embedder.WithLMStudioDimensions(cfg.Embedder.Dimensions),
 		)
 		if err := lmstudioEmb.Ping(ctx); err != nil {
 			return fmt.Errorf("cannot connect to LM Studio: %w\nMake sure LM Studio is running with the %s model loaded", err, cfg.Embedder.Model)
@@ -106,7 +110,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		st = gobStore
 	case "postgres":
 		var err error
-		st, err = store.NewPostgresStore(ctx, cfg.Store.Postgres.DSN, projectRoot)
+		st, err = store.NewPostgresStore(ctx, cfg.Store.Postgres.DSN, projectRoot, cfg.Embedder.Dimensions)
 		if err != nil {
 			return fmt.Errorf("failed to connect to postgres: %w", err)
 		}

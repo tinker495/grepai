@@ -12,9 +12,9 @@ import (
 )
 
 const (
-	defaultOpenAIEndpoint  = "https://api.openai.com/v1"
-	defaultOpenAIModel     = "text-embedding-3-small"
-	openAI3SmallDimensions = 1536
+	defaultOpenAIEndpoint         = "https://api.openai.com/v1"
+	defaultOpenAIModel            = "text-embedding-3-small"
+	defaultOpenAI3SmallDimensions = 1536
 )
 
 type OpenAIEmbedder struct {
@@ -26,8 +26,9 @@ type OpenAIEmbedder struct {
 }
 
 type openAIEmbedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model      string   `json:"model"`
+	Input      []string `json:"input"`
+	Dimensions int      `json:"dimensions,omitempty"`
 }
 
 type openAIEmbedResponse struct {
@@ -67,12 +68,17 @@ func WithOpenAIKey(key string) OpenAIOption {
 		e.apiKey = key
 	}
 }
+func WithOpenAIDimensions(dimensions int) OpenAIOption {
+	return func(e *OpenAIEmbedder) {
+		e.dimensions = dimensions
+	}
+}
 
 func NewOpenAIEmbedder(opts ...OpenAIOption) (*OpenAIEmbedder, error) {
 	e := &OpenAIEmbedder{
 		endpoint:   defaultOpenAIEndpoint,
 		model:      defaultOpenAIModel,
-		dimensions: openAI3SmallDimensions,
+		dimensions: defaultOpenAI3SmallDimensions,
 		client: &http.Client{
 			Timeout: 60 * time.Second,
 		},
@@ -108,8 +114,9 @@ func (e *OpenAIEmbedder) EmbedBatch(ctx context.Context, texts []string) ([][]fl
 	}
 
 	reqBody := openAIEmbedRequest{
-		Model: e.model,
-		Input: texts,
+		Model:      e.model,
+		Input:      texts,
+		Dimensions: e.dimensions,
 	}
 
 	jsonData, err := json.Marshal(reqBody)

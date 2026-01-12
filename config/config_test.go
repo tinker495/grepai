@@ -6,6 +6,11 @@ import (
 	"testing"
 )
 
+const (
+	endpoints  = "https://api.grepai.com/v1"
+	dimensions = 1536
+)
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 
@@ -19,6 +24,10 @@ func TestDefaultConfig(t *testing.T) {
 
 	if cfg.Embedder.Model != "nomic-embed-text" {
 		t.Errorf("expected model nomic-embed-text, got %s", cfg.Embedder.Model)
+	}
+
+	if cfg.Embedder.Dimensions != 768 {
+		t.Errorf("expected dimensions 768, got %d", cfg.Embedder.Dimensions)
 	}
 
 	if cfg.Store.Backend != "gob" {
@@ -43,6 +52,8 @@ func TestConfigSaveAndLoad(t *testing.T) {
 
 	cfg := DefaultConfig()
 	cfg.Embedder.Provider = "openai"
+	cfg.Embedder.Dimensions = dimensions
+	cfg.Embedder.Endpoint = endpoints
 	cfg.Store.Backend = "postgres"
 
 	err := cfg.Save(tmpDir)
@@ -66,8 +77,15 @@ func TestConfigSaveAndLoad(t *testing.T) {
 		t.Errorf("expected provider openai, got %s", loaded.Embedder.Provider)
 	}
 
+	if loaded.Embedder.Dimensions != dimensions {
+		t.Errorf("expected dimensions %d, got %d", dimensions, loaded.Embedder.Dimensions)
+	}
+
 	if loaded.Store.Backend != "postgres" {
 		t.Errorf("expected backend postgres, got %s", loaded.Store.Backend)
+	}
+	if loaded.Embedder.Endpoint != endpoints {
+		t.Errorf("expected endpoint %s, got %s", endpoints, loaded.Embedder.Endpoint)
 	}
 }
 
@@ -115,5 +133,110 @@ func TestGetIndexPath(t *testing.T) {
 
 	if result != expected {
 		t.Errorf("expected %s, got %s", expected, result)
+	}
+}
+
+// TestBackwardCompatibility verifies that old configs without dimensions/endpoint
+// still work correctly by applying sensible defaults.
+func TestBackwardCompatibility(t *testing.T) {
+	tests := []struct {
+		name               string
+		configYAML         string
+		expectedEndpoint   string
+		expectedDimensions int
+	}{
+		{
+			name: "ollama without endpoint or dimensions",
+			configYAML: `version: 1
+embedder:
+  provider: ollama
+  model: nomic-embed-text
+store:
+  backend: gob
+`,
+			expectedEndpoint:   "http://localhost:11434",
+			expectedDimensions: 768,
+		},
+		{
+			name: "openai without endpoint or dimensions",
+			configYAML: `version: 1
+embedder:
+  provider: openai
+  model: text-embedding-3-small
+  api_key: sk-test
+store:
+  backend: gob
+`,
+			expectedEndpoint:   "https://api.openai.com/v1",
+			expectedDimensions: 1536,
+		},
+		{
+			name: "lmstudio without endpoint or dimensions",
+			configYAML: `version: 1
+embedder:
+  provider: lmstudio
+  model: text-embedding-nomic-embed-text-v1.5
+store:
+  backend: gob
+`,
+			expectedEndpoint:   "http://127.0.0.1:1234",
+			expectedDimensions: 768,
+		},
+		{
+			name: "openai with custom endpoint keeps it",
+			configYAML: `version: 1
+embedder:
+  provider: openai
+  model: text-embedding-ada-002
+  endpoint: https://my-azure.openai.azure.com/v1
+  api_key: sk-test
+store:
+  backend: gob
+`,
+			expectedEndpoint:   "https://my-azure.openai.azure.com/v1",
+			expectedDimensions: 1536,
+		},
+		{
+			name: "custom dimensions preserved",
+			configYAML: `version: 1
+embedder:
+  provider: openai
+  model: text-embedding-3-large
+  dimensions: 3072
+  api_key: sk-test
+store:
+  backend: gob
+`,
+			expectedEndpoint:   "https://api.openai.com/v1",
+			expectedDimensions: 3072,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configDir := filepath.Join(tmpDir, ConfigDir)
+			if err := os.MkdirAll(configDir, 0755); err != nil {
+				t.Fatalf("failed to create config dir: %v", err)
+			}
+
+			configPath := filepath.Join(configDir, ConfigFileName)
+			if err := os.WriteFile(configPath, []byte(tt.configYAML), 0600); err != nil {
+				t.Fatalf("failed to write config: %v", err)
+			}
+
+			loaded, err := Load(tmpDir)
+			if err != nil {
+				t.Fatalf("failed to load config: %v", err)
+			}
+
+			if loaded.Embedder.Endpoint != tt.expectedEndpoint {
+				t.Errorf("expected endpoint %s, got %s", tt.expectedEndpoint, loaded.Embedder.Endpoint)
+			}
+
+			if loaded.Embedder.Dimensions != tt.expectedDimensions {
+				t.Errorf("expected dimensions %d, got %d", tt.expectedDimensions, loaded.Embedder.Dimensions)
+			}
+		})
 	}
 }
