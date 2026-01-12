@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-01-12
+
+### Added
+
+- **Java Language Support for Trace**: Symbol extraction and call graph analysis now supports Java (#32)
+  - Classes (with extends/implements, generics, sealed/non-sealed)
+  - Inner and nested classes
+  - Interfaces (including generic interfaces)
+  - Annotations (`@interface`)
+  - Enums (top-level and inner, with methods)
+  - Records (Java 14+)
+  - Methods with all modifiers (public, protected, private, static, final, abstract, synchronized, native, strictfp)
+  - Constructors
+  - Default interface methods (Java 8+)
+  - Abstract methods
+  - Java keywords added to filter out false positives
+  - `.java` added to default traced languages
+
 ## [0.13.0] - 2026-01-12
 
 ### Added
@@ -194,7 +212,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Initial public release
 
-[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/yoanbernabeu/grepai/compare/v0.13.0...v0.14.0
 [0.13.0]: https://github.com/yoanbernabeu/grepai/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/yoanbernabeu/grepai/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/yoanbernabeu/grepai/compare/v0.10.0...v0.11.0
