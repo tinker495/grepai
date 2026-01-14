@@ -54,3 +54,6 @@ require (
 
 // Exclude the separate javascript submodule to use the one from the main module
 exclude github.com/smacker/go-tree-sitter/javascript v0.0.1
+
+// Exclude the separate csharp submodule to use the one from the main module
+exclude github.com/smacker/go-tree-sitter/csharp v0.0.0-20240827094217-dd81d9e9be82

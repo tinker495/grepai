@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	sitter "github.com/smacker/go-tree-sitter"
+	"github.com/smacker/go-tree-sitter/csharp"
 	"github.com/smacker/go-tree-sitter/golang"
 	"github.com/smacker/go-tree-sitter/javascript"
 	"github.com/smacker/go-tree-sitter/php"
@@ -35,6 +36,7 @@ func NewTreeSitterExtractor() (*TreeSitterExtractor, error) {
 		".tsx": typescript.GetLanguage(),
 		".py":  python.GetLanguage(),
 		".php": php.GetLanguage(),
+		".cs":  csharp.GetLanguage(),
 	}
 
 	for extension, lang := range languages {
@@ -96,6 +98,8 @@ func (e *TreeSitterExtractor) walkNodeForSymbols(node *sitter.Node, content []by
 		e.extractPythonSymbol(node, nodeType, content, filePath, symbols)
 	case ".php":
 		e.extractPHPSymbol(node, nodeType, content, filePath, symbols)
+	case ".cs":
+		e.extractCSharpSymbol(node, nodeType, content, filePath, symbols)
 	}
 
 	for i := 0; i < int(node.ChildCount()); i++ {
@@ -349,6 +353,52 @@ func (e *TreeSitterExtractor) extractPHPSymbol(node *sitter.Node, nodeType strin
 	}
 }
 
+func (e *TreeSitterExtractor) extractCSharpSymbol(node *sitter.Node, nodeType string, content []byte, filePath string, symbols *[]Symbol) {
+	switch nodeType {
+	case "class_declaration", "struct_declaration", "record_declaration":
+		nameNode := node.ChildByFieldName("name")
+		if nameNode != nil {
+			name := nameNode.Content(content)
+			*symbols = append(*symbols, Symbol{
+				Name:     name,
+				Kind:     KindClass,
+				File:     filePath,
+				Line:     int(node.StartPoint().Row) + 1,
+				EndLine:  int(node.EndPoint().Row) + 1,
+				Language: "csharp",
+			})
+		}
+
+	case "interface_declaration":
+		nameNode := node.ChildByFieldName("name")
+		if nameNode != nil {
+			name := nameNode.Content(content)
+			*symbols = append(*symbols, Symbol{
+				Name:     name,
+				Kind:     KindInterface,
+				File:     filePath,
+				Line:     int(node.StartPoint().Row) + 1,
+				EndLine:  int(node.EndPoint().Row) + 1,
+				Language: "csharp",
+			})
+		}
+
+	case "method_declaration", "constructor_declaration":
+		nameNode := node.ChildByFieldName("name")
+		if nameNode != nil {
+			name := nameNode.Content(content)
+			*symbols = append(*symbols, Symbol{
+				Name:     name,
+				Kind:     KindMethod,
+				File:     filePath,
+				Line:     int(node.StartPoint().Row) + 1,
+				EndLine:  int(node.EndPoint().Row) + 1,
+				Language: "csharp",
+			})
+		}
+	}
+}
+
 // ExtractReferences extracts all symbol references from a file.
 func (e *TreeSitterExtractor) ExtractReferences(ctx context.Context, filePath string, content string) ([]Reference, error) {
 	ext := strings.ToLower(filepath.Ext(filePath))
@@ -374,8 +424,11 @@ func (e *TreeSitterExtractor) ExtractReferences(ctx context.Context, filePath st
 func (e *TreeSitterExtractor) walkNodeForCalls(node *sitter.Node, content []byte, filePath string, ext string, refs *[]Reference) {
 	nodeType := node.Type()
 
-	if nodeType == "call_expression" {
+	if nodeType == "call_expression" || nodeType == "invocation_expression" {
 		funcNode := node.ChildByFieldName("function")
+		if funcNode == nil {
+			funcNode = node.ChildByFieldName("expression")
+		}
 		if funcNode != nil {
 			name := funcNode.Content(content)
 			// Get just the function name (remove receiver if present)
@@ -407,7 +460,7 @@ func (e *TreeSitterExtractor) findContainingFunction(node *sitter.Node, content 
 	parent := node.Parent()
 	for parent != nil {
 		switch parent.Type() {
-		case "function_declaration", "method_declaration", "function_definition":
+		case "function_declaration", "method_declaration", "constructor_declaration", "function_definition", "local_function_statement":
 			nameNode := parent.ChildByFieldName("name")
 			if nameNode != nil {
 				return nameNode.Content(content)
