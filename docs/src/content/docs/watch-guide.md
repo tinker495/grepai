@@ -154,9 +154,93 @@ The watcher periodically saves the index:
 - **Shutdown save**: Clean save on Ctrl+C or SIGTERM
 - **Location**: `.grepai/index.gob` (or PostgreSQL)
 
-### Running in Background
+### Background Daemon Mode
 
-For long-running sessions, consider using a terminal multiplexer or process manager:
+Run the watcher as a background daemon with built-in lifecycle management:
+
+```bash
+# Start the watcher in background
+grepai watch --background
+
+# Check if the watcher is running
+grepai watch --status
+
+# Stop the background watcher gracefully
+grepai watch --stop
+```
+
+#### Starting the Daemon
+
+```bash
+$ grepai watch --background
+Background watcher started (PID 12345)
+Logs: /Users/you/Library/Logs/grepai/grepai-watch.log
+
+Use 'grepai watch --status' to check status
+Use 'grepai watch --stop' to stop the watcher
+```
+
+The daemon waits for full initialization (embedder connection, initial scan) before returning success.
+
+#### Checking Status
+
+```bash
+$ grepai watch --status
+Status: running
+PID: 12345
+Log directory: /Users/you/Library/Logs/grepai
+Log file: /Users/you/Library/Logs/grepai/grepai-watch.log
+```
+
+#### Stopping the Daemon
+
+```bash
+$ grepai watch --stop
+Stopping background watcher (PID 12345)...
+Background watcher stopped
+```
+
+The daemon performs a graceful shutdown, persisting the index before exiting.
+
+#### Log Locations
+
+Logs are stored in OS-specific directories:
+
+| Platform | Log Directory |
+|----------|---------------|
+| Linux | `~/.local/state/grepai/logs/` (or `$XDG_STATE_HOME`) |
+| macOS | `~/Library/Logs/grepai/` |
+| Windows | `%LOCALAPPDATA%\grepai\logs\` |
+
+Use `--log-dir` to override:
+
+```bash
+grepai watch --background --log-dir /custom/path
+grepai watch --status --log-dir /custom/path
+grepai watch --stop --log-dir /custom/path
+```
+
+#### Log Management
+
+Logs are not rotated automatically. To prevent disk usage growth:
+
+```bash
+# Truncate log file (macOS example)
+echo "" > ~/Library/Logs/grepai/grepai-watch.log
+
+# Or set up logrotate (Linux) / newsyslog (macOS)
+```
+
+#### PID File Management
+
+The daemon uses PID files with file locking to:
+- Prevent multiple watchers from starting simultaneously
+- Automatically clean up stale PID files from crashed processes
+- Detect if a watcher is already running
+
+#### Alternative: Terminal Multiplexers
+
+You can also use traditional tools if preferred:
 
 ```bash
 # Using tmux
@@ -164,9 +248,6 @@ tmux new-session -d -s grepai 'grepai watch'
 
 # Using screen
 screen -dmS grepai grepai watch
-
-# Using nohup
-nohup grepai watch > grepai.log 2>&1 &
 ```
 
 ### Troubleshooting
