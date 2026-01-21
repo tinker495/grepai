@@ -1,7 +1,7 @@
 ---
 title: Welcome to the grepai Blog
 description: Introducing the grepai blog where we'll share news, tutorials, and updates about semantic code search.
-pubDate: 2025-01-21
+pubDate: 2026-01-19
 author: grepai Team
 tags:
   - announcement
