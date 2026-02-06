@@ -6,7 +6,7 @@ Thank you for your interest in contributing to grepai! This document provides gu
 
 ### Prerequisites
 
-- Go 1.22 or later
+- Go 1.24 or later
 - Ollama (for local testing with embeddings)
 - Git
 
@@ -134,11 +134,17 @@ grepai/
 ├── cmd/grepai/      # CLI entry point
 ├── cli/             # Cobra commands
 ├── config/          # Configuration management
-├── embedder/        # Embedding providers (Ollama, OpenAI)
-├── store/           # Vector storage backends (GOB, Postgres)
+├── daemon/          # Background daemon management
+├── docs/            # Documentation
+├── embedder/        # Embedding providers (Ollama, OpenAI, LMStudio)
 ├── indexer/         # File scanning and chunking
-├── watcher/         # File system watcher
-└── search/          # Search functionality
+├── mcp/             # MCP (Model Context Protocol) server
+├── rpg/             # RPG semantic graph (feature hierarchy, query engine)
+├── search/          # Search functionality (vector + hybrid)
+├── store/           # Vector storage backends (GOB, Postgres, Qdrant)
+├── trace/           # Symbol extraction and call graph tracing
+├── updater/         # Self-update mechanism
+└── watcher/         # File system watcher
 ```
 
 ## Adding New Features
