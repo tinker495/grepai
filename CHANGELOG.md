@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Incremental evolution with Jaccard-based drift detection
   - Integrated into `grepai watch` - graph builds automatically when enabled
   - New config section `rpg:` with `enabled`, `feature_mode`, `drift_threshold`, `max_traversal_depth`
-  - MCP tools: `grepai_rpg_search`, `grepai_rpg_explore`, `grepai_rpg_node`
+  - RPG context enhances existing `grepai_search` results when enabled
   - Gated by `rpg.enabled: true` in config (default: false)
 
 ## [0.27.0] - 2026-02-04

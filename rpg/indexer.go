@@ -222,9 +222,19 @@ func (idx *RPGIndexer) GetEvolver() *Evolver {
 }
 
 // linkChunksToSymbols creates EdgeMapsToChunk edges for overlapping chunks and symbols.
+// It first removes existing chunk nodes for the file to prevent edge accumulation.
 func (idx *RPGIndexer) linkChunksToSymbols(graph *Graph, filePath string, chunks []store.Chunk) error {
-	// Get all symbol nodes for this file
+	// Clean up existing chunk nodes for this file to prevent edge accumulation
+	// RemoveNode handles all edge and index cleanup
 	fileNodes := graph.GetNodesByFile(filePath)
+	for _, node := range fileNodes {
+		if node.Kind == KindChunk {
+			graph.RemoveNode(node.ID)
+		}
+	}
+
+	// Re-fetch file nodes after cleanup (byFile index was modified)
+	fileNodes = graph.GetNodesByFile(filePath)
 	var symbolNodes []*Node
 	for _, node := range fileNodes {
 		if node.Kind == KindSymbol {

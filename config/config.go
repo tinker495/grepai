@@ -210,6 +210,9 @@ func DefaultConfig() *Config {
 			FeatureMode:       "local",
 			DriftThreshold:    0.35,
 			MaxTraversalDepth: 3,
+			LLMProvider:       "ollama",
+			LLMModel:          "lfm2.5-thinking",
+			LLMEndpoint:       "http://localhost:11434/v1",
 			LLMTimeoutMs:      8000,
 		},
 		Update: UpdateConfig{
@@ -339,6 +342,15 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RPG.MaxTraversalDepth <= 0 {
 		c.RPG.MaxTraversalDepth = 3
+	}
+	if c.RPG.LLMProvider == "" {
+		c.RPG.LLMProvider = "ollama"
+	}
+	if c.RPG.LLMModel == "" {
+		c.RPG.LLMModel = "lfm2.5-thinking"
+	}
+	if c.RPG.LLMEndpoint == "" {
+		c.RPG.LLMEndpoint = "http://localhost:11434/v1"
 	}
 	if c.RPG.LLMTimeoutMs <= 0 {
 		c.RPG.LLMTimeoutMs = 8000
