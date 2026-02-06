@@ -13,6 +13,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/search"
 	"github.com/yoanbernabeu/grepai/store"
 	"github.com/yoanbernabeu/grepai/trace"
@@ -27,19 +28,23 @@ type Server struct {
 
 // SearchResult is a lightweight struct for MCP output.
 type SearchResult struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float32 `json:"score"`
-	Content   string  `json:"content"`
+	FilePath    string  `json:"file_path"`
+	StartLine   int     `json:"start_line"`
+	EndLine     int     `json:"end_line"`
+	Score       float32 `json:"score"`
+	Content     string  `json:"content"`
+	FeaturePath string  `json:"feature_path,omitempty"`
+	SymbolName  string  `json:"symbol_name,omitempty"`
 }
 
 // SearchResultCompact is a minimal struct for compact output (no content field).
 type SearchResultCompact struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float32 `json:"score"`
+	FilePath    string  `json:"file_path"`
+	StartLine   int     `json:"start_line"`
+	EndLine     int     `json:"end_line"`
+	Score       float32 `json:"score"`
+	FeaturePath string  `json:"feature_path,omitempty"`
+	SymbolName  string  `json:"symbol_name,omitempty"`
 }
 
 // CallSiteCompact is a minimal struct for compact output (no context field).
@@ -77,6 +82,9 @@ type IndexStatus struct {
 	Provider     string `json:"provider"`
 	Model        string `json:"model"`
 	SymbolsReady bool   `json:"symbols_ready"`
+	RPGEnabled   bool   `json:"rpg_enabled"`
+	RPGNodes     int    `json:"rpg_nodes,omitempty"`
+	RPGEdges     int    `json:"rpg_edges,omitempty"`
 }
 
 // encodeOutput encodes data in the specified format (json or toon).
@@ -276,6 +284,30 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 	}
 
+	// RPG enrichment
+	type rpgInfo struct {
+		featurePath string
+		symbolName  string
+	}
+	rpgData := make(map[int]rpgInfo)
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt != nil {
+		defer rpgSt.Close()
+		graph := rpgSt.GetGraph()
+		for i, r := range results {
+			nodes := graph.GetNodesByFile(r.Chunk.FilePath)
+			for _, n := range nodes {
+				if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.StartLine && n.EndLine >= r.Chunk.StartLine {
+					fetchRes, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
+					if err == nil && fetchRes != nil {
+						rpgData[i] = rpgInfo{featurePath: fetchRes.FeaturePath, symbolName: n.SymbolName}
+					}
+					break
+				}
+			}
+		}
+	}
+
 	var data any
 	if compact {
 		searchResultsCompact := make([]SearchResultCompact, len(results))
@@ -285,6 +317,10 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 				StartLine: r.Chunk.StartLine,
 				EndLine:   r.Chunk.EndLine,
 				Score:     r.Score,
+			}
+			if info, ok := rpgData[i]; ok {
+				searchResultsCompact[i].FeaturePath = info.featurePath
+				searchResultsCompact[i].SymbolName = info.symbolName
 			}
 		}
 		data = searchResultsCompact
@@ -297,6 +333,10 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 				EndLine:   r.Chunk.EndLine,
 				Score:     r.Score,
 				Content:   r.Chunk.Content,
+			}
+			if info, ok := rpgData[i]; ok {
+				searchResults[i].FeaturePath = info.featurePath
+				searchResults[i].SymbolName = info.symbolName
 			}
 		}
 		data = searchResults
@@ -814,6 +854,16 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcp.CallToolRequ
 		SymbolsReady: symbolsReady,
 	}
 
+	// Check RPG status
+	rpgSt, _, _ := s.tryLoadRPG(ctx)
+	if rpgSt != nil {
+		status.RPGEnabled = true
+		rpgStats := rpgSt.GetGraph().Stats()
+		status.RPGNodes = rpgStats.TotalNodes
+		status.RPGEdges = rpgStats.TotalEdges
+		rpgSt.Close()
+	}
+
 	output, err := encodeOutput(status, format)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to encode status: %v", err)), nil
@@ -902,4 +952,29 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// tryLoadRPG attempts to load the RPG store. Returns nil values if RPG is disabled or unavailable.
+func (s *Server) tryLoadRPG(ctx context.Context) (rpg.RPGStore, *rpg.QueryEngine, error) {
+	if s.projectRoot == "" {
+		return nil, nil, nil
+	}
+	cfg, err := config.Load(s.projectRoot)
+	if err != nil {
+		return nil, nil, nil
+	}
+	if !cfg.RPG.Enabled {
+		return nil, nil, nil
+	}
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(s.projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		return nil, nil, nil
+	}
+	graph := rpgStore.GetGraph()
+	if graph.Stats().TotalNodes == 0 {
+		rpgStore.Close()
+		return nil, nil, nil
+	}
+	qe := rpg.NewQueryEngine(graph)
+	return rpgStore, qe, nil
 }

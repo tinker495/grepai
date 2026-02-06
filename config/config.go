@@ -14,6 +14,7 @@ const (
 	ConfigFileName      = "config.yaml"
 	IndexFileName       = "index.gob"
 	SymbolIndexFileName = "symbols.gob"
+	RPGIndexFileName    = "rpg.gob"
 )
 
 type Config struct {
@@ -24,6 +25,7 @@ type Config struct {
 	Watch             WatchConfig    `yaml:"watch"`
 	Search            SearchConfig   `yaml:"search"`
 	Trace             TraceConfig    `yaml:"trace"`
+	RPG               RPGConfig      `yaml:"rpg"`
 	Update            UpdateConfig   `yaml:"update"`
 	Ignore            []string       `yaml:"ignore"`
 	ExternalGitignore string         `yaml:"external_gitignore,omitempty"`
@@ -113,6 +115,19 @@ type TraceConfig struct {
 	ExcludePatterns  []string `yaml:"exclude_patterns"`  // Patterns to exclude
 }
 
+type RPGConfig struct {
+	Enabled           bool    `yaml:"enabled"`
+	StorePath         string  `yaml:"store_path,omitempty"`
+	FeatureMode       string  `yaml:"feature_mode"`       // local | hybrid | llm
+	DriftThreshold    float64 `yaml:"drift_threshold"`
+	MaxTraversalDepth int     `yaml:"max_traversal_depth"`
+	LLMProvider       string  `yaml:"llm_provider,omitempty"`
+	LLMModel          string  `yaml:"llm_model,omitempty"`
+	LLMEndpoint       string  `yaml:"llm_endpoint,omitempty"`
+	LLMAPIKey         string  `yaml:"llm_api_key,omitempty"`
+	LLMTimeoutMs      int     `yaml:"llm_timeout_ms,omitempty"`
+}
+
 func DefaultConfig() *Config {
 	defaultDim := 768
 	return &Config{
@@ -190,6 +205,13 @@ func DefaultConfig() *Config {
 				"__tests__/*",
 			},
 		},
+		RPG: RPGConfig{
+			Enabled:           false,
+			FeatureMode:       "local",
+			DriftThreshold:    0.35,
+			MaxTraversalDepth: 3,
+			LLMTimeoutMs:      8000,
+		},
 		Update: UpdateConfig{
 			CheckOnStartup: false, // Opt-in by default for privacy
 		},
@@ -227,6 +249,10 @@ func GetIndexPath(projectRoot string) string {
 
 func GetSymbolIndexPath(projectRoot string) string {
 	return filepath.Join(GetConfigDir(projectRoot), SymbolIndexFileName)
+}
+
+func GetRPGIndexPath(projectRoot string) string {
+	return filepath.Join(GetConfigDir(projectRoot), RPGIndexFileName)
 }
 
 func Load(projectRoot string) (*Config, error) {
@@ -302,6 +328,20 @@ func (c *Config) applyDefaults() {
 	// Qdrant defaults
 	if c.Store.Backend == "qdrant" && c.Store.Qdrant.Port <= 0 {
 		c.Store.Qdrant.Port = 6334
+	}
+
+	// RPG defaults
+	if c.RPG.FeatureMode == "" {
+		c.RPG.FeatureMode = "local"
+	}
+	if c.RPG.DriftThreshold <= 0 {
+		c.RPG.DriftThreshold = 0.35
+	}
+	if c.RPG.MaxTraversalDepth <= 0 {
+		c.RPG.MaxTraversalDepth = 3
+	}
+	if c.RPG.LLMTimeoutMs <= 0 {
+		c.RPG.LLMTimeoutMs = 8000
 	}
 }
 
