@@ -355,71 +355,40 @@ func TestGOBStore_GetChunksForFile(t *testing.T) {
 	}
 }
 
-func TestGOBStore_LookupByContentHash_WithSecondary(t *testing.T) {
-	// Create primary GOB
-	primaryPath := filepath.Join(t.TempDir(), "primary.gob")
-
-	// Create secondary GOB with some chunks
-	secondaryPath := filepath.Join(t.TempDir(), "secondary.gob")
-	secondaryStore := NewGOBStore(secondaryPath)
-
+func TestGOBStore_LookupByContentHash(t *testing.T) {
+	indexPath := filepath.Join(t.TempDir(), "index.gob")
+	store := NewGOBStore(indexPath)
 	ctx := context.Background()
 
-	// Add a chunk to secondary
-	secondaryStore.SaveChunks(ctx, []Chunk{
+	// Add chunks with content hashes
+	store.SaveChunks(ctx, []Chunk{
 		{
-			ID:          "test-chunk-1",
+			ID:          "chunk-1",
 			FilePath:    "main.go",
 			Content:     "func main() {}",
 			Vector:      []float32{0.1, 0.2, 0.3},
 			ContentHash: "abc123",
 		},
 	})
-	secondaryStore.Persist(ctx)
 
-	// Create primary with secondary reference
-	store := NewGOBStoreWithSecondary(primaryPath, secondaryPath)
-	if err := store.Load(ctx); err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-
-	// Lookup should find the chunk in secondary
+	// Lookup existing hash
 	vec, found, err := store.LookupByContentHash(ctx, "abc123")
 	if err != nil {
 		t.Fatalf("LookupByContentHash failed: %v", err)
 	}
 	if !found {
-		t.Fatal("Expected to find chunk in secondary GOB")
+		t.Fatal("Expected to find chunk by content hash")
 	}
 	if len(vec) != 3 || vec[0] != 0.1 {
 		t.Errorf("Unexpected vector: %v", vec)
 	}
 
-	// Lookup for non-existent hash should return not found
+	// Lookup non-existent hash
 	_, found, err = store.LookupByContentHash(ctx, "nonexistent")
 	if err != nil {
 		t.Fatalf("LookupByContentHash failed: %v", err)
 	}
 	if found {
 		t.Fatal("Expected not found for non-existent hash")
-	}
-}
-
-func TestGOBStore_SecondaryNotSet(t *testing.T) {
-	primaryPath := filepath.Join(t.TempDir(), "primary.gob")
-	store := NewGOBStore(primaryPath)
-
-	ctx := context.Background()
-	if err := store.Load(ctx); err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-
-	// Should work fine without secondary
-	_, found, err := store.LookupByContentHash(ctx, "anything")
-	if err != nil {
-		t.Fatalf("LookupByContentHash failed: %v", err)
-	}
-	if found {
-		t.Fatal("Expected not found")
 	}
 }
