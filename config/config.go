@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/yoanbernabeu/grepai/git"
 	"gopkg.in/yaml.v3"
 )
 
@@ -357,4 +358,60 @@ func FindProjectRoot() (string, error) {
 	}
 
 	return "", fmt.Errorf("no grepai project found (run 'grepai init' first)")
+}
+
+// FindProjectRootWithGit extends FindProjectRoot with git worktree awareness.
+// It first tries the standard .grepai/ directory walk. If found, it also returns
+// git worktree info if available. If .grepai/ is not found locally but we're in
+// a git worktree, it checks the main worktree for .grepai/config.yaml.
+//
+// Returns:
+//   - projectRoot: the directory containing .grepai/
+//   - gitInfo: git worktree detection info (nil if not in a git repo)
+//   - err: error if neither local nor main worktree has .grepai/
+func FindProjectRootWithGit() (string, *git.DetectInfo, error) {
+	// Try standard FindProjectRoot first
+	projectRoot, findErr := FindProjectRoot()
+
+	// Get current directory for git detection
+	cwd, err := os.Getwd()
+	if err != nil {
+		if findErr == nil {
+			return projectRoot, nil, nil
+		}
+		return "", nil, findErr
+	}
+
+	// Resolve symlinks (same as FindProjectRoot does)
+	cwd, err = filepath.EvalSymlinks(cwd)
+	if err != nil {
+		if findErr == nil {
+			return projectRoot, nil, nil
+		}
+		return "", nil, findErr
+	}
+
+	// Try to detect git info
+	gitInfo, gitErr := git.Detect(cwd)
+	if gitErr != nil {
+		// Not in a git repo - return whatever FindProjectRoot returned
+		if findErr == nil {
+			return projectRoot, nil, nil
+		}
+		return "", nil, findErr
+	}
+
+	// If we found .grepai/ locally, return it with git info
+	if findErr == nil {
+		return projectRoot, gitInfo, nil
+	}
+
+	// .grepai/ not found locally, but we're in a git repo
+	// If we're in a linked worktree, check if main worktree has .grepai/
+	if gitInfo.IsWorktree && Exists(gitInfo.MainWorktree) {
+		return gitInfo.MainWorktree, gitInfo, nil
+	}
+
+	// No .grepai/ found anywhere
+	return "", gitInfo, findErr
 }

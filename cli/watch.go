@@ -15,6 +15,7 @@ import (
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/daemon"
 	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/yoanbernabeu/grepai/git"
 	"github.com/yoanbernabeu/grepai/indexer"
 	"github.com/yoanbernabeu/grepai/store"
 	"github.com/yoanbernabeu/grepai/trace"
@@ -100,23 +101,44 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return runWorkspaceWatch(logDir)
 	}
 
+	// Detect worktree
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	gitInfo, gitErr := git.Detect(cwd)
+	var worktreeID string
+	if gitErr == nil && gitInfo.WorktreeID != "" {
+		worktreeID = gitInfo.WorktreeID
+	}
+
 	// Handle --status flag
 	if watchStatus {
-		return showWatchStatus(logDir)
+		return showWatchStatus(logDir, worktreeID)
 	}
 
 	// Handle --stop flag
 	if watchStop {
-		return stopWatchDaemon(logDir)
+		return stopWatchDaemon(logDir, worktreeID)
 	}
 
 	// Handle --background flag
 	if watchBackground {
-		return startBackgroundWatch(logDir)
+		return startBackgroundWatch(logDir, worktreeID)
 	}
 
 	// Check if already running in background (automatically cleans up stale PIDs)
-	pid, err := daemon.GetRunningPID(logDir)
+	var pid int
+	if worktreeID != "" {
+		pid, err = daemon.GetRunningWorktreePID(logDir, worktreeID)
+		if pid == 0 && err == nil {
+			// Fallback: check regular PID file for backward compatibility
+			pid, err = daemon.GetRunningPID(logDir)
+		}
+	} else {
+		pid, err = daemon.GetRunningPID(logDir)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to check running status: %w", err)
 	}
@@ -128,9 +150,20 @@ func runWatch(cmd *cobra.Command, args []string) error {
 	return runWatchForeground()
 }
 
-func showWatchStatus(logDir string) error {
+func showWatchStatus(logDir, worktreeID string) error {
 	// Get running PID (automatically cleans up stale PIDs)
-	pid, err := daemon.GetRunningPID(logDir)
+	var pid int
+	var err error
+	var logFile string
+
+	if worktreeID != "" {
+		pid, err = daemon.GetRunningWorktreePID(logDir, worktreeID)
+		logFile = daemon.GetWorktreeLogFile(logDir, worktreeID)
+	} else {
+		pid, err = daemon.GetRunningPID(logDir)
+		logFile = filepath.Join(logDir, "grepai-watch.log")
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to read PID file: %w", err)
 	}
@@ -138,20 +171,37 @@ func showWatchStatus(logDir string) error {
 	if pid == 0 {
 		fmt.Println("Status: not running")
 		fmt.Printf("Log directory: %s\n", logDir)
+		if worktreeID != "" {
+			fmt.Printf("Worktree ID: %s\n", worktreeID)
+		}
 		return nil
 	}
 
 	fmt.Println("Status: running")
 	fmt.Printf("PID: %d\n", pid)
 	fmt.Printf("Log directory: %s\n", logDir)
-	fmt.Printf("Log file: %s\n", filepath.Join(logDir, "grepai-watch.log"))
+	fmt.Printf("Log file: %s\n", logFile)
+	if worktreeID != "" {
+		fmt.Printf("Worktree ID: %s\n", worktreeID)
+	}
 
 	return nil
 }
 
-func stopWatchDaemon(logDir string) error {
+func stopWatchDaemon(logDir, worktreeID string) error {
 	// Get running PID (automatically cleans up stale PIDs)
-	pid, err := daemon.GetRunningPID(logDir)
+	var pid int
+	var err error
+	var logFile string
+
+	if worktreeID != "" {
+		pid, err = daemon.GetRunningWorktreePID(logDir, worktreeID)
+		logFile = daemon.GetWorktreeLogFile(logDir, worktreeID)
+	} else {
+		pid, err = daemon.GetRunningPID(logDir)
+		logFile = filepath.Join(logDir, "grepai-watch.log")
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to read PID file: %w", err)
 	}
@@ -189,21 +239,38 @@ func stopWatchDaemon(logDir string) error {
 	// Verify the process actually stopped
 	if daemon.IsProcessRunning(pid) {
 		return fmt.Errorf("process did not stop within %v\nStill running? Try: kill -9 %d\nOr check logs at: %s",
-			shutdownTimeout, pid, filepath.Join(logDir, "grepai-watch.log"))
+			shutdownTimeout, pid, logFile)
 	}
 
 	// Clean up PID file
-	if err := daemon.RemovePIDFile(logDir); err != nil {
-		return fmt.Errorf("failed to remove PID file: %w", err)
+	if worktreeID != "" {
+		if err := daemon.RemoveWorktreePIDFile(logDir, worktreeID); err != nil {
+			return fmt.Errorf("failed to remove PID file: %w", err)
+		}
+	} else {
+		if err := daemon.RemovePIDFile(logDir); err != nil {
+			return fmt.Errorf("failed to remove PID file: %w", err)
+		}
 	}
 
 	fmt.Println("Background watcher stopped")
 	return nil
 }
 
-func startBackgroundWatch(logDir string) error {
+func startBackgroundWatch(logDir, worktreeID string) error {
 	// Check if already running (automatically cleans up stale PIDs)
-	pid, err := daemon.GetRunningPID(logDir)
+	var pid int
+	var err error
+	var logFile string
+
+	if worktreeID != "" {
+		pid, err = daemon.GetRunningWorktreePID(logDir, worktreeID)
+		logFile = daemon.GetWorktreeLogFile(logDir, worktreeID)
+	} else {
+		pid, err = daemon.GetRunningPID(logDir)
+		logFile = filepath.Join(logDir, "grepai-watch.log")
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to check running status: %w", err)
 	}
@@ -218,7 +285,12 @@ func startBackgroundWatch(logDir string) error {
 	}
 
 	// Spawn background process
-	childPID, err := daemon.SpawnBackground(logDir, args)
+	var childPID int
+	if worktreeID != "" {
+		childPID, err = daemon.SpawnWorktreeBackground(logDir, worktreeID, args)
+	} else {
+		childPID, err = daemon.SpawnBackground(logDir, args)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to start background process: %w", err)
 	}
@@ -231,9 +303,19 @@ func startBackgroundWatch(logDir string) error {
 
 	for time.Now().Before(deadline) {
 		// Check if ready file exists (initialization succeeded)
-		if daemon.IsReady(logDir) {
+		var isReady bool
+		if worktreeID != "" {
+			isReady = daemon.IsWorktreeReady(logDir, worktreeID)
+		} else {
+			isReady = daemon.IsReady(logDir)
+		}
+
+		if isReady {
 			fmt.Printf("Background watcher started (PID %d)\n", childPID)
-			fmt.Printf("Logs: %s\n", filepath.Join(logDir, "grepai-watch.log"))
+			fmt.Printf("Logs: %s\n", logFile)
+			if worktreeID != "" {
+				fmt.Printf("Worktree ID: %s\n", worktreeID)
+			}
 			fmt.Printf("\nUse 'grepai watch --status' to check status\n")
 			fmt.Printf("Use 'grepai watch --stop' to stop the watcher\n")
 			return nil
@@ -241,14 +323,14 @@ func startBackgroundWatch(logDir string) error {
 
 		// Check if process exited (initialization failed)
 		if !daemon.IsProcessRunning(childPID) {
-			return fmt.Errorf("background process failed to start (check logs at %s)", filepath.Join(logDir, "grepai-watch.log"))
+			return fmt.Errorf("background process failed to start (check logs at %s)", logFile)
 		}
 
 		time.Sleep(pollInterval)
 	}
 
 	// Timeout - process is still running but hasn't become ready
-	return fmt.Errorf("timeout waiting for process to become ready after %v (check logs at %s)", startupTimeout, filepath.Join(logDir, "grepai-watch.log"))
+	return fmt.Errorf("timeout waiting for process to become ready after %v (check logs at %s)", startupTimeout, logFile)
 }
 
 func initializeEmbedder(ctx context.Context, cfg *config.Config) (embedder.Embedder, error) {
@@ -449,6 +531,7 @@ func runWatchForeground() error {
 
 	// If running in background, determine log directory and write PID file
 	var logDir string
+	var worktreeID string
 	if isBackgroundChild {
 		// Configure structured logging with timestamps for daemon mode
 		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
@@ -463,15 +546,38 @@ func runWatchForeground() error {
 			}
 		}
 
+		// Detect worktree
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("failed to get current directory: %w", err)
+		}
+
+		gitInfo, gitErr := git.Detect(cwd)
+		if gitErr == nil && gitInfo.WorktreeID != "" {
+			worktreeID = gitInfo.WorktreeID
+		}
+
 		// Write PID file
-		if err := daemon.WritePIDFile(logDir); err != nil {
-			return fmt.Errorf("failed to write PID file: %w", err)
+		if worktreeID != "" {
+			if err := daemon.WriteWorktreePIDFile(logDir, worktreeID); err != nil {
+				return fmt.Errorf("failed to write PID file: %w", err)
+			}
+		} else {
+			if err := daemon.WritePIDFile(logDir); err != nil {
+				return fmt.Errorf("failed to write PID file: %w", err)
+			}
 		}
 
 		// Ensure PID file is removed on exit
 		defer func() {
-			if err := daemon.RemovePIDFile(logDir); err != nil {
-				log.Printf("Warning: failed to remove PID file on exit: %v", err)
+			if worktreeID != "" {
+				if err := daemon.RemoveWorktreePIDFile(logDir, worktreeID); err != nil {
+					log.Printf("Warning: failed to remove PID file on exit: %v", err)
+				}
+			} else {
+				if err := daemon.RemovePIDFile(logDir); err != nil {
+					log.Printf("Warning: failed to remove PID file on exit: %v", err)
+				}
 			}
 		}()
 	}
@@ -563,13 +669,25 @@ func runWatchForeground() error {
 
 	// Write ready file to signal successful initialization (background mode only)
 	if isBackgroundChild {
-		if err := daemon.WriteReadyFile(logDir); err != nil {
-			return fmt.Errorf("failed to write ready file: %w", err)
+		if worktreeID != "" {
+			if err := daemon.WriteWorktreeReadyFile(logDir, worktreeID); err != nil {
+				return fmt.Errorf("failed to write ready file: %w", err)
+			}
+		} else {
+			if err := daemon.WriteReadyFile(logDir); err != nil {
+				return fmt.Errorf("failed to write ready file: %w", err)
+			}
 		}
 		// Ensure ready file is cleaned up on exit
 		defer func() {
-			if err := daemon.RemoveReadyFile(logDir); err != nil {
-				log.Printf("Warning: failed to remove ready file on exit: %v", err)
+			if worktreeID != "" {
+				if err := daemon.RemoveWorktreeReadyFile(logDir, worktreeID); err != nil {
+					log.Printf("Warning: failed to remove ready file on exit: %v", err)
+				}
+			} else {
+				if err := daemon.RemoveReadyFile(logDir); err != nil {
+					log.Printf("Warning: failed to remove ready file on exit: %v", err)
+				}
 			}
 		}()
 	}

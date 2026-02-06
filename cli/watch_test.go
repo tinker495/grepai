@@ -20,7 +20,7 @@ func TestShowWatchStatus_NotRunning(t *testing.T) {
 	logDir := t.TempDir()
 
 	// Status with no PID file
-	err := showWatchStatus(logDir)
+	err := showWatchStatus(logDir, "")
 	if err != nil {
 		t.Fatalf("showWatchStatus() failed: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestShowWatchStatus_Running(t *testing.T) {
 	defer daemon.RemovePIDFile(logDir)
 
 	// Status with running process
-	err := showWatchStatus(logDir)
+	err := showWatchStatus(logDir, "")
 	if err != nil {
 		t.Fatalf("showWatchStatus() failed: %v", err)
 	}
@@ -56,7 +56,7 @@ func TestShowWatchStatus_StalePID(t *testing.T) {
 	}
 
 	// Status should clean stale PID
-	err := showWatchStatus(logDir)
+	err := showWatchStatus(logDir, "")
 	if err != nil {
 		t.Fatalf("showWatchStatus() failed: %v", err)
 	}
@@ -73,7 +73,7 @@ func TestStopWatchDaemon_NotRunning(t *testing.T) {
 	logDir := t.TempDir()
 
 	// Stop with no PID file
-	err := stopWatchDaemon(logDir)
+	err := stopWatchDaemon(logDir, "")
 	if err != nil {
 		t.Fatalf("stopWatchDaemon() failed: %v", err)
 	}
@@ -89,7 +89,7 @@ func TestStopWatchDaemon_StalePID(t *testing.T) {
 	}
 
 	// Stop should clean stale PID
-	err := stopWatchDaemon(logDir)
+	err := stopWatchDaemon(logDir, "")
 	if err != nil {
 		t.Fatalf("stopWatchDaemon() failed: %v", err)
 	}
@@ -113,7 +113,7 @@ func TestStartBackgroundWatch_AlreadyRunning(t *testing.T) {
 	defer daemon.RemovePIDFile(logDir)
 
 	// Try to start background watch (should fail)
-	err := startBackgroundWatch(logDir)
+	err := startBackgroundWatch(logDir, "")
 	if err == nil {
 		t.Fatal("startBackgroundWatch() should have failed when already running")
 	}
@@ -270,7 +270,7 @@ func TestStopWatchDaemon_WaitForShutdown(t *testing.T) {
 
 	// Measure time taken
 	start := time.Now()
-	err := stopWatchDaemon(logDir)
+	err := stopWatchDaemon(logDir, "")
 	elapsed := time.Since(start)
 
 	if err != nil {
