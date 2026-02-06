@@ -506,6 +506,42 @@ func (s *Server) createWorkspaceStore(ctx context.Context, ws *config.Workspace)
 	}
 }
 
+// enrichTraceSymbols enriches trace symbols with RPG feature paths.
+// It loads the RPG store once and enriches all provided symbols in one pass.
+func (s *Server) enrichTraceSymbols(ctx context.Context, symbols ...*trace.Symbol) {
+	if s.projectRoot == "" {
+		return
+	}
+	cfg, err := config.Load(s.projectRoot)
+	if err != nil || !cfg.RPG.Enabled {
+		return
+	}
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(s.projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		return
+	}
+	defer rpgStore.Close()
+
+	graph := rpgStore.GetGraph()
+	qe := rpg.NewQueryEngine(graph)
+
+	for _, sym := range symbols {
+		if sym == nil || sym.File == "" {
+			continue
+		}
+		nodes := graph.GetNodesByFile(sym.File)
+		for _, n := range nodes {
+			if n.Kind == rpg.KindSymbol && n.SymbolName == sym.Name {
+				fetchResult, fetchErr := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
+				if fetchErr == nil && fetchResult != nil {
+					sym.FeaturePath = fetchResult.FeaturePath
+				}
+				break
+			}
+		}
+	}
+}
+
 // handleTraceCallers handles the grepai_trace_callers tool call.
 func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	symbolName, err := request.RequireString("symbol")
@@ -588,6 +624,13 @@ func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolReq
 			})
 		}
 
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{resultCompact.Symbol}
+		for i := range resultCompact.Callers {
+			symPtrs = append(symPtrs, &resultCompact.Callers[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
+
 		data = resultCompact
 	} else {
 		result := trace.TraceResult{
@@ -614,6 +657,13 @@ func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolReq
 				},
 			})
 		}
+
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{result.Symbol}
+		for i := range result.Callers {
+			symPtrs = append(symPtrs, &result.Callers[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
 
 		data = result
 	}
@@ -708,6 +758,13 @@ func (s *Server) handleTraceCallees(ctx context.Context, request mcp.CallToolReq
 			})
 		}
 
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{resultCompact.Symbol}
+		for i := range resultCompact.Callees {
+			symPtrs = append(symPtrs, &resultCompact.Callees[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
+
 		data = resultCompact
 	} else {
 		result := trace.TraceResult{
@@ -733,6 +790,13 @@ func (s *Server) handleTraceCallees(ctx context.Context, request mcp.CallToolReq
 				},
 			})
 		}
+
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{result.Symbol}
+		for i := range result.Callees {
+			symPtrs = append(symPtrs, &result.Callees[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
 
 		data = result
 	}
@@ -791,6 +855,25 @@ func (s *Server) handleTraceGraph(ctx context.Context, request mcp.CallToolReque
 		Query: symbolName,
 		Mode:  "fast",
 		Graph: graph,
+	}
+
+	// Enrich graph nodes with RPG
+	if result.Graph != nil {
+		// Collect symbols as pointers for enrichment, paired with their map keys
+		type symEntry struct {
+			name string
+			sym  trace.Symbol
+		}
+		entries := make([]symEntry, 0, len(result.Graph.Nodes))
+		symPtrs := make([]*trace.Symbol, 0, len(result.Graph.Nodes))
+		for name, sym := range result.Graph.Nodes {
+			entries = append(entries, symEntry{name: name, sym: sym})
+			symPtrs = append(symPtrs, &entries[len(entries)-1].sym)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
+		for _, e := range entries {
+			result.Graph.Nodes[e.name] = e.sym
+		}
 	}
 
 	output, err := encodeOutput(result, format)
