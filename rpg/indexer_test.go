@@ -2,6 +2,7 @@ package rpg
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 
 	"github.com/yoanbernabeu/grepai/store"
@@ -24,7 +25,7 @@ func TestLinkChunksForFile_NoAccumulation(t *testing.T) {
 	g.AddNode(symNode)
 	g.AddEdge(&Edge{From: fileNode.ID, To: symNode.ID, Type: EdgeContains, Weight: 1.0})
 
-	rpgStore := &GOBRPGStore{indexPath: "/dev/null", graph: g}
+	rpgStore := &GOBRPGStore{indexPath: filepath.Join(t.TempDir(), "rpg.gob"), graph: g}
 	extractor := NewLocalExtractor()
 	indexer := NewRPGIndexer(rpgStore, extractor, "/tmp", RPGIndexerConfig{DriftThreshold: 0.35})
 
