@@ -8,11 +8,12 @@
 // Start a background process:
 //
 //	logDir, _ := daemon.GetDefaultLogDir()
-//	pid, err := daemon.SpawnBackground(logDir, []string{"watch"})
+//	pid, exitCh, err := daemon.SpawnBackground(logDir, []string{"watch"})
 //	if err != nil {
 //	    log.Fatal(err)
 //	}
 //	fmt.Printf("Started with PID %d\n", pid)
+//	// exitCh receives when child exits (detects early failures)
 //
 // Check if the process is running:
 //
@@ -262,54 +263,19 @@ func IsReady(logDir string) bool {
 //   - GREPAI_BACKGROUND=1 environment variable set
 //   - process group detachment (Unix only)
 //
-// The parent process does NOT wait for the child - the child runs independently
-// and will be reaped by the OS when it exits.
-//
 // Args should be the command-line arguments to pass to the child process
 // (e.g., []string{"watch"} for "grepai watch").
 //
-// Returns the child process PID on success. The caller should verify the child
-// started successfully by polling IsReady() or checking IsProcessRunning().
-func SpawnBackground(logDir string, args []string) (int, error) {
+// Returns the child PID and an exit channel. The exit channel receives when
+// the child process terminates, enabling callers to detect early failures
+// without relying on kill(0) which cannot distinguish zombie processes.
+func SpawnBackground(logDir string, args []string) (int, <-chan error, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return 0, fmt.Errorf("failed to create log directory: %w", err)
+		return 0, nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	// Get the current executable path
-	executable, err := os.Executable()
-	if err != nil {
-		return 0, fmt.Errorf("failed to get executable path: %w", err)
-	}
-
-	// Open log file
 	logPath := filepath.Join(logDir, logFileName)
-	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
-	if err != nil {
-		return 0, fmt.Errorf("failed to open log file: %w", err)
-	}
-	defer logFile.Close()
-
-	// Prepare command
-	cmd := exec.Command(executable, args...)
-	cmd.Stdout = logFile
-	cmd.Stderr = logFile
-	cmd.Stdin = nil
-
-	// Set environment variable to indicate background mode
-	cmd.Env = append(os.Environ(), "GREPAI_BACKGROUND=1")
-
-	// Platform-specific process attributes (e.g., detach from parent process group on Unix)
-	cmd.SysProcAttr = sysProcAttr()
-
-	// Start the process
-	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("failed to start background process: %w", err)
-	}
-
-	// Don't wait for the process - we're detaching completely.
-	// The OS will reap the child when it exits.
-
-	return cmd.Process.Pid, nil
+	return spawnBackgroundWithLog(logDir, logPath, args)
 }
 
 // StopProcess sends an interrupt signal to the process with the given PID.
@@ -479,9 +445,9 @@ func IsWorktreeReady(logDir, worktreeID string) bool {
 }
 
 // SpawnWorktreeBackground re-executes the current binary for worktree watch in background.
-func SpawnWorktreeBackground(logDir, worktreeID string, extraArgs []string) (int, error) {
+func SpawnWorktreeBackground(logDir, worktreeID string, extraArgs []string) (int, <-chan error, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return 0, fmt.Errorf("failed to create log directory: %w", err)
+		return 0, nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	// Use worktree-specific log file
@@ -491,17 +457,19 @@ func SpawnWorktreeBackground(logDir, worktreeID string, extraArgs []string) (int
 }
 
 // spawnBackgroundWithLog spawns a background process with a custom log file.
-func spawnBackgroundWithLog(logDir, logPath string, args []string) (int, error) {
+// Returns the child PID and a channel that receives an error (or nil) when the
+// child exits. This allows callers to detect early termination without relying
+// on kill(0), which cannot distinguish zombie processes.
+func spawnBackgroundWithLog(logDir, logPath string, args []string) (int, <-chan error, error) {
 	executable, err := os.Executable()
 	if err != nil {
-		return 0, fmt.Errorf("failed to get executable path: %w", err)
+		return 0, nil, fmt.Errorf("failed to get executable path: %w", err)
 	}
 
 	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
-		return 0, fmt.Errorf("failed to open log file: %w", err)
+		return 0, nil, fmt.Errorf("failed to open log file: %w", err)
 	}
-	defer logFile.Close()
 
 	cmd := exec.Command(executable, args...)
 	cmd.Stdout = logFile
@@ -511,8 +479,16 @@ func spawnBackgroundWithLog(logDir, logPath string, args []string) (int, error) 
 	cmd.SysProcAttr = sysProcAttr()
 
 	if err := cmd.Start(); err != nil {
-		return 0, fmt.Errorf("failed to start background process: %w", err)
+		logFile.Close()
+		return 0, nil, fmt.Errorf("failed to start background process: %w", err)
 	}
 
-	return cmd.Process.Pid, nil
+	// Monitor child exit in a goroutine so callers can detect early termination.
+	exitCh := make(chan error, 1)
+	go func() {
+		exitCh <- cmd.Wait()
+		logFile.Close()
+	}()
+
+	return cmd.Process.Pid, exitCh, nil
 }

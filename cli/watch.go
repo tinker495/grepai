@@ -289,17 +289,18 @@ func startBackgroundWatch(logDir, worktreeID string) error {
 
 	// Spawn background process
 	var childPID int
+	var exitCh <-chan error
 	if worktreeID != "" {
-		childPID, err = daemon.SpawnWorktreeBackground(logDir, worktreeID, args)
+		childPID, exitCh, err = daemon.SpawnWorktreeBackground(logDir, worktreeID, args)
 	} else {
-		childPID, err = daemon.SpawnBackground(logDir, args)
+		childPID, exitCh, err = daemon.SpawnBackground(logDir, args)
 	}
 	if err != nil {
 		return fmt.Errorf("failed to start background process: %w", err)
 	}
 
 	// Wait for process to become ready or fail
-	// Poll for ready file with timeout
+	// Poll for ready file with timeout, also checking for early child exit
 	const startupTimeout = 30 * time.Second
 	const pollInterval = 250 * time.Millisecond
 	deadline := time.Now().Add(startupTimeout)
@@ -324,9 +325,12 @@ func startBackgroundWatch(logDir, worktreeID string) error {
 			return nil
 		}
 
-		// Check if process exited (initialization failed)
-		if !daemon.IsProcessRunning(childPID) {
+		// Check if child process exited early (detects failures immediately,
+		// unlike kill(0) which reports zombies as alive)
+		select {
+		case <-exitCh:
 			return fmt.Errorf("background process failed to start (check logs at %s)", logFile)
+		default:
 		}
 
 		time.Sleep(pollInterval)
@@ -1223,7 +1227,7 @@ func startBackgroundWorkspaceWatch(logDir string, ws *config.Workspace) error {
 	}
 
 	// Spawn background process
-	childPID, err := daemon.SpawnWorkspaceBackground(logDir, ws.Name, extraArgs)
+	childPID, exitCh, err := daemon.SpawnWorkspaceBackground(logDir, ws.Name, extraArgs)
 	if err != nil {
 		return fmt.Errorf("failed to start background process: %w", err)
 	}
@@ -1233,23 +1237,27 @@ func startBackgroundWorkspaceWatch(logDir string, ws *config.Workspace) error {
 	const pollInterval = 250 * time.Millisecond
 	deadline := time.Now().Add(startupTimeout)
 
+	wsLogFile := daemon.GetWorkspaceLogFile(logDir, ws.Name)
+
 	for time.Now().Before(deadline) {
 		if daemon.IsWorkspaceReady(logDir, ws.Name) {
 			fmt.Printf("Workspace watcher %s started (PID %d)\n", ws.Name, childPID)
-			fmt.Printf("Logs: %s\n", daemon.GetWorkspaceLogFile(logDir, ws.Name))
+			fmt.Printf("Logs: %s\n", wsLogFile)
 			fmt.Printf("\nUse 'grepai watch --workspace %s --status' to check status\n", ws.Name)
 			fmt.Printf("Use 'grepai watch --workspace %s --stop' to stop the watcher\n", ws.Name)
 			return nil
 		}
 
-		if !daemon.IsProcessRunning(childPID) {
-			return fmt.Errorf("background process failed to start (check logs at %s)", daemon.GetWorkspaceLogFile(logDir, ws.Name))
+		select {
+		case <-exitCh:
+			return fmt.Errorf("background process failed to start (check logs at %s)", wsLogFile)
+		default:
 		}
 
 		time.Sleep(pollInterval)
 	}
 
-	return fmt.Errorf("timeout waiting for process to become ready (check logs at %s)", daemon.GetWorkspaceLogFile(logDir, ws.Name))
+	return fmt.Errorf("timeout waiting for process to become ready (check logs at %s)", wsLogFile)
 }
 
 func runWorkspaceWatchForeground(logDir string, ws *config.Workspace) error {

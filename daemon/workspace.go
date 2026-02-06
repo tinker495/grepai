@@ -155,9 +155,9 @@ func IsWorkspaceReady(logDir, workspaceName string) bool {
 }
 
 // SpawnWorkspaceBackground re-executes the current binary for workspace watch in background.
-func SpawnWorkspaceBackground(logDir, workspaceName string, extraArgs []string) (int, error) {
+func SpawnWorkspaceBackground(logDir, workspaceName string, extraArgs []string) (int, <-chan error, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
-		return 0, fmt.Errorf("failed to create log directory: %w", err)
+		return 0, nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
 	// Build args for background process
