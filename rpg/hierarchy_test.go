@@ -1,6 +1,7 @@
 package rpg
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -383,6 +384,91 @@ func TestBuildHierarchy(t *testing.T) {
 	}
 	if !found {
 		t.Error("Subcategory should have EdgeContains edge to category")
+	}
+}
+
+func TestEnrichLabels(t *testing.T) {
+	g := NewGraph()
+	ext := NewLocalExtractor()
+	h := NewHierarchyBuilder(g, ext)
+
+	// Create area and category hierarchy
+	areaID := h.EnsureArea("cli")
+	catID := h.EnsureCategory(areaID, "search")
+	subcatID := h.EnsureSubcategory(catID, "handle")
+
+	// Create symbol nodes pointing to subcategory
+	sym1 := &Node{ID: "sym:cli/search.go:HandleSearch", Kind: KindSymbol, Feature: "handle-search", Path: "cli/search.go", SymbolName: "HandleSearch"}
+	sym2 := &Node{ID: "sym:cli/search.go:HandleQuery", Kind: KindSymbol, Feature: "handle-query", Path: "cli/search.go", SymbolName: "HandleQuery"}
+	sym3 := &Node{ID: "sym:cli/search.go:RunSearch", Kind: KindSymbol, Feature: "run-search", Path: "cli/search.go", SymbolName: "RunSearch"}
+	g.AddNode(sym1)
+	g.AddNode(sym2)
+	g.AddNode(sym3)
+
+	// Link symbols to subcategory via EdgeFeatureParent
+	g.AddEdge(&Edge{From: sym1.ID, To: subcatID, Type: EdgeFeatureParent, Weight: 1.0})
+	g.AddEdge(&Edge{From: sym2.ID, To: subcatID, Type: EdgeFeatureParent, Weight: 1.0})
+	g.AddEdge(&Edge{From: sym3.ID, To: subcatID, Type: EdgeFeatureParent, Weight: 1.0})
+
+	h.EnrichLabels()
+
+	// Check that area got enriched
+	areaNode := g.GetNode(areaID)
+	if areaNode.SemanticLabel == "" {
+		t.Error("Expected area to have SemanticLabel after enrichment")
+	}
+	// Should contain "handle" as the most common verb (appears 2x)
+	if !strings.Contains(areaNode.SemanticLabel, "handle") {
+		t.Errorf("Expected SemanticLabel to contain 'handle', got %q", areaNode.SemanticLabel)
+	}
+	// Should also contain "run" (appears 1x)
+	if !strings.Contains(areaNode.SemanticLabel, "run") {
+		t.Errorf("Expected SemanticLabel to contain 'run', got %q", areaNode.SemanticLabel)
+	}
+	// Feature field should NOT be modified
+	if areaNode.Feature != "cli" {
+		t.Errorf("Feature should remain 'cli', got %q", areaNode.Feature)
+	}
+
+	// Check category enrichment
+	catNode := g.GetNode(catID)
+	if catNode.SemanticLabel == "" {
+		t.Error("Expected category to have SemanticLabel after enrichment")
+	}
+	if !strings.Contains(catNode.SemanticLabel, "handle") {
+		t.Errorf("Expected category SemanticLabel to contain 'handle', got %q", catNode.SemanticLabel)
+	}
+}
+
+func TestTopN(t *testing.T) {
+	counts := map[string]int{
+		"handle":   5,
+		"parse":    3,
+		"validate": 1,
+		"run":      4,
+	}
+
+	result := topN(counts, 2)
+	if len(result) != 2 {
+		t.Fatalf("Expected 2 results, got %d", len(result))
+	}
+	if result[0] != "handle" {
+		t.Errorf("Expected first entry 'handle', got %q", result[0])
+	}
+	if result[1] != "run" {
+		t.Errorf("Expected second entry 'run', got %q", result[1])
+	}
+
+	// Test with n larger than map size
+	result = topN(counts, 10)
+	if len(result) != 4 {
+		t.Errorf("Expected 4 results when n > len, got %d", len(result))
+	}
+
+	// Test with empty map
+	result = topN(map[string]int{}, 3)
+	if len(result) != 0 {
+		t.Errorf("Expected 0 results for empty map, got %d", len(result))
 	}
 }
 

@@ -3,6 +3,7 @@ package rpg
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -122,17 +123,27 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 			// For callee, look up in all files
 			calleeNodes := graph.GetNodesByKind(KindSymbol)
 			var bestMatch *Node
+			var samePackageMatch *Node
 			for _, cn := range calleeNodes {
 				if cn.SymbolName == ce.Callee {
-					if bestMatch == nil {
-						bestMatch = cn
-					}
-					// Prefer same-file match
+					// Priority 1: same-file match (break immediately)
 					if cn.Path == ce.File {
 						bestMatch = cn
 						break
 					}
+					// Priority 2: same-package match
+					if samePackageMatch == nil && filepath.Dir(cn.Path) == filepath.Dir(ce.File) {
+						samePackageMatch = cn
+					}
+					// Priority 3: any match (first seen)
+					if bestMatch == nil {
+						bestMatch = cn
+					}
 				}
+			}
+			// Prefer same-package over random cross-package match
+			if samePackageMatch != nil && (bestMatch == nil || bestMatch.Path != ce.File) {
+				bestMatch = samePackageMatch
 			}
 			if bestMatch != nil && callerID != "" {
 				graph.AddEdge(&Edge{
@@ -146,10 +157,47 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 		}
 	}
 
-	// Step 3: Wire import edges from references
-	// We'll analyze references to detect imports
-	// For now, we'll skip this as the SymbolStore interface doesn't expose references directly
-	// This can be enhanced later
+	// Step 3: Wire import edges by analyzing cross-file invocations.
+	// When a symbol in file A invokes a symbol in file B, file A imports file B.
+	importsSeen := make(map[string]bool) // "fileA->fileB" dedup key
+	for _, e := range graph.Edges {
+		if e.Type != EdgeInvokes {
+			continue
+		}
+		callerNode := graph.GetNode(e.From)
+		calleeNode := graph.GetNode(e.To)
+		if callerNode == nil || calleeNode == nil {
+			continue
+		}
+		if callerNode.Path == "" || calleeNode.Path == "" || callerNode.Path == calleeNode.Path {
+			continue
+		}
+		key := callerNode.Path + "->" + calleeNode.Path
+		if importsSeen[key] {
+			continue
+		}
+		importsSeen[key] = true
+
+		fromFileID := MakeNodeID(KindFile, callerNode.Path)
+		toFileID := MakeNodeID(KindFile, calleeNode.Path)
+		if graph.GetNode(fromFileID) != nil && graph.GetNode(toFileID) != nil {
+			graph.AddEdge(&Edge{
+				From:      fromFileID,
+				To:        toFileID,
+				Type:      EdgeImports,
+				Weight:    1.0,
+				UpdatedAt: time.Now(),
+			})
+		}
+	}
+
+	// Step 3b: Wire semantic similarity edges from feature label overlap.
+	// Symbols in different files with similar features are likely related.
+	idx.wireFeatureSimilarity(graph)
+
+	// Step 3c: Wire co-caller affinity edges.
+	// Symbols frequently called together by the same callers are likely related.
+	idx.wireCoCallerAffinity(graph)
 
 	// Step 4: Link vector chunks to symbols
 	for _, filePath := range docs {
@@ -165,6 +213,9 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 
 	// Step 5: Build hierarchy
 	idx.hierarchy.BuildHierarchy()
+
+	// Step 5b: Enrich hierarchy with semantic labels
+	idx.hierarchy.EnrichLabels()
 
 	// Step 6: Persist
 	if err := idx.store.Persist(ctx); err != nil {
@@ -303,4 +354,167 @@ func normalizeEndLine(startLine, endLine int) int {
 // overlaps checks if two line ranges overlap.
 func overlaps(start1, end1, start2, end2 int) bool {
 	return start1 <= end2 && start2 <= end1
+}
+
+// wireFeatureSimilarity creates EdgeSemanticSim edges between symbols in different
+// files whose feature labels have high Jaccard similarity. To avoid O(n^2),
+// symbols are grouped by their feature verb (first word) and only compared within groups.
+func (idx *RPGIndexer) wireFeatureSimilarity(graph *Graph) {
+	const minSim = 0.5
+
+	symbolNodes := graph.GetNodesByKind(KindSymbol)
+
+	// Group symbols by feature verb for efficiency
+	byVerb := make(map[string][]*Node)
+	for _, n := range symbolNodes {
+		if n.Feature == "" {
+			continue
+		}
+		verb := firstWord(n.Feature)
+		if verb != "" {
+			byVerb[verb] = append(byVerb[verb], n)
+		}
+	}
+
+	seen := make(map[string]bool) // dedup "idA|idB"
+
+	for _, group := range byVerb {
+		if len(group) < 2 {
+			continue
+		}
+		for i := 0; i < len(group); i++ {
+			for j := i + 1; j < len(group); j++ {
+				a, b := group[i], group[j]
+				if a.Path == b.Path {
+					continue // skip same-file pairs
+				}
+
+				// Canonical key for dedup
+				key := a.ID + "|" + b.ID
+				if a.ID > b.ID {
+					key = b.ID + "|" + a.ID
+				}
+				if seen[key] {
+					continue
+				}
+
+				sim := featureSimilarity(a.Feature, b.Feature)
+				if sim >= minSim {
+					seen[key] = true
+					graph.AddEdge(&Edge{
+						From:      a.ID,
+						To:        b.ID,
+						Type:      EdgeSemanticSim,
+						Weight:    sim,
+						UpdatedAt: time.Now(),
+					})
+				}
+			}
+		}
+	}
+}
+
+// wireCoCallerAffinity creates EdgeSemanticSim edges between symbols that are
+// frequently called by the same callers (co-callees pattern).
+func (idx *RPGIndexer) wireCoCallerAffinity(graph *Graph) {
+	const minCoOccurrence = 2
+
+	// Build caller -> callees map from EdgeInvokes
+	callerToCallees := make(map[string][]string)
+	for _, e := range graph.Edges {
+		if e.Type == EdgeInvokes {
+			callerToCallees[e.From] = append(callerToCallees[e.From], e.To)
+		}
+	}
+
+	// Count co-occurrences
+	cooccurrence := make(map[string]int)
+	for _, callees := range callerToCallees {
+		if len(callees) < 2 {
+			continue
+		}
+		for i := 0; i < len(callees); i++ {
+			for j := i + 1; j < len(callees); j++ {
+				a, b := callees[i], callees[j]
+				if a > b {
+					a, b = b, a
+				}
+				cooccurrence[a+"|"+b]++
+			}
+		}
+	}
+
+	// Create edges for pairs with enough co-occurrences
+	for key, count := range cooccurrence {
+		if count < minCoOccurrence {
+			continue
+		}
+		parts := strings.SplitN(key, "|", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		nodeA := graph.GetNode(parts[0])
+		nodeB := graph.GetNode(parts[1])
+		if nodeA == nil || nodeB == nil {
+			continue
+		}
+		// Skip same-file (feature overlap already handles those)
+		if nodeA.Path == nodeB.Path {
+			continue
+		}
+
+		// Weight: normalize count (cap at 1.0)
+		weight := float64(count) / 5.0
+		if weight > 1.0 {
+			weight = 1.0
+		}
+
+		graph.AddEdge(&Edge{
+			From:      parts[0],
+			To:        parts[1],
+			Type:      EdgeSemanticSim,
+			Weight:    weight,
+			UpdatedAt: time.Now(),
+		})
+	}
+}
+
+// featureSimilarity computes Jaccard similarity between two feature label word sets.
+func featureSimilarity(a, b string) float64 {
+	if a == b {
+		return 1.0
+	}
+	wordsA := splitFeatureWords(a)
+	wordsB := splitFeatureWords(b)
+	if len(wordsA) == 0 || len(wordsB) == 0 {
+		return 0
+	}
+
+	union := make(map[string]bool)
+	for w := range wordsA {
+		union[w] = true
+	}
+	for w := range wordsB {
+		union[w] = true
+	}
+
+	intersection := 0
+	for w := range wordsA {
+		if wordsB[w] {
+			intersection++
+		}
+	}
+
+	if len(union) == 0 {
+		return 0
+	}
+	return float64(intersection) / float64(len(union))
+}
+
+// firstWord returns the first word of a feature label (the verb).
+func firstWord(feature string) string {
+	if idx := strings.IndexAny(feature, "-_/ @"); idx >= 0 {
+		return feature[:idx]
+	}
+	return feature
 }

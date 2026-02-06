@@ -2,6 +2,7 @@ package rpg
 
 import (
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -247,4 +248,86 @@ func fileNameStem(name string) string {
 		return name
 	}
 	return strings.TrimSuffix(name, ext)
+}
+
+// EnrichLabels enriches area and category nodes with semantic summaries
+// derived from their descendant symbol features. This adds semantic depth
+// to directory-based hierarchy labels by populating the SemanticLabel field.
+//
+// Example: area "cli" with descendants [handle-search, handle-trace, run-watch]
+// becomes "cli [handle, run]" providing semantic context about what the area does.
+func (h *HierarchyBuilder) EnrichLabels() {
+	for _, area := range h.graph.GetNodesByKind(KindArea) {
+		verbs := h.collectDescendantVerbs(area.ID)
+		if len(verbs) > 0 {
+			area.SemanticLabel = area.Feature + " [" + strings.Join(topN(verbs, 3), ", ") + "]"
+		}
+	}
+	for _, cat := range h.graph.GetNodesByKind(KindCategory) {
+		verbs := h.collectDescendantVerbs(cat.ID)
+		if len(verbs) > 0 {
+			cat.SemanticLabel = cat.Feature + " [" + strings.Join(topN(verbs, 3), ", ") + "]"
+		}
+	}
+}
+
+// collectDescendantVerbs collects feature verbs from all descendant symbol nodes.
+func (h *HierarchyBuilder) collectDescendantVerbs(nodeID string) map[string]int {
+	verbCounts := make(map[string]int)
+	visited := make(map[string]bool)
+	h.walkDescendants(nodeID, visited, verbCounts)
+	return verbCounts
+}
+
+// walkDescendants recursively collects feature verbs from descendants.
+func (h *HierarchyBuilder) walkDescendants(nodeID string, visited map[string]bool, verbCounts map[string]int) {
+	if visited[nodeID] {
+		return
+	}
+	visited[nodeID] = true
+
+	// Check incoming edges (children point TO parents via EdgeFeatureParent/EdgeContains)
+	for _, e := range h.graph.GetIncoming(nodeID) {
+		if e.Type == EdgeFeatureParent || e.Type == EdgeContains {
+			child := h.graph.GetNode(e.From)
+			if child == nil {
+				continue
+			}
+			if child.Kind == KindSymbol {
+				// Extract verb from feature
+				if child.Feature != "" {
+					verb := firstWord(child.Feature)
+					if verb != "" {
+						verbCounts[verb]++
+					}
+				}
+			} else {
+				// Recurse into hierarchy children
+				h.walkDescendants(child.ID, visited, verbCounts)
+			}
+		}
+	}
+}
+
+// topN returns the top N entries from a frequency map, sorted by count descending.
+func topN(counts map[string]int, n int) []string {
+	type entry struct {
+		key   string
+		count int
+	}
+	entries := make([]entry, 0, len(counts))
+	for k, v := range counts {
+		entries = append(entries, entry{k, v})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].count != entries[j].count {
+			return entries[i].count > entries[j].count
+		}
+		return entries[i].key < entries[j].key
+	})
+	result := make([]string, 0, n)
+	for i := 0; i < len(entries) && i < n; i++ {
+		result = append(result, entries[i].key)
+	}
+	return result
 }

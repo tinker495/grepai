@@ -223,6 +223,66 @@ func (s *Server) registerTools() {
 		),
 	)
 	s.mcpServer.AddTool(indexStatusTool, s.handleIndexStatus)
+
+	// grepai_rpg_search tool
+	rpgSearchTool := mcp.NewTool("grepai_rpg_search",
+		mcp.WithDescription("Search RPG nodes using Jaccard-based semantic matching with scope and kind filtering."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Natural language or feature query to search for"),
+		),
+		mcp.WithString("scope",
+			mcp.Description("Area/category path to narrow search (e.g., 'cli', 'rpg/query')"),
+		),
+		mcp.WithString("kinds",
+			mcp.Description("Comma-separated node kinds to filter: area, category, subcategory, file, symbol, chunk (default: symbol)"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of results to return (default: 10)"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(rpgSearchTool, s.handleRPGSearch)
+
+	// grepai_rpg_fetch tool
+	rpgFetchTool := mcp.NewTool("grepai_rpg_fetch",
+		mcp.WithDescription("Fetch detailed information about a specific RPG node including hierarchy, edges, and context."),
+		mcp.WithString("node_id",
+			mcp.Required(),
+			mcp.Description("Node ID to fetch (e.g., 'sym:main.go:HandleRequest')"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(rpgFetchTool, s.handleRPGFetch)
+
+	// grepai_rpg_explore tool
+	rpgExploreTool := mcp.NewTool("grepai_rpg_explore",
+		mcp.WithDescription("Explore the RPG graph using BFS traversal from a starting node with configurable depth and edge type filtering."),
+		mcp.WithString("start_node_id",
+			mcp.Required(),
+			mcp.Description("Starting node ID for graph traversal"),
+		),
+		mcp.WithString("direction",
+			mcp.Description("Traversal direction: 'forward', 'reverse', or 'both' (default: 'both')"),
+		),
+		mcp.WithNumber("depth",
+			mcp.Description("Maximum BFS depth (default: 2)"),
+		),
+		mcp.WithString("edge_types",
+			mcp.Description("Comma-separated edge types to follow: feature_parent, contains, invokes, imports, maps_to_chunk, semantic_sim"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum nodes to return (default: 100)"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(rpgExploreTool, s.handleRPGExplore)
 }
 
 // handleSearch handles the grepai_search tool call.
@@ -297,7 +357,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		for i, r := range results {
 			nodes := graph.GetNodesByFile(r.Chunk.FilePath)
 			for _, n := range nodes {
-				if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.StartLine && n.EndLine >= r.Chunk.StartLine {
+				if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.EndLine && r.Chunk.StartLine <= n.EndLine {
 					fetchRes, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
 					if err == nil && fetchRes != nil {
 						rpgData[i] = rpgInfo{featurePath: fetchRes.FeaturePath, symbolName: n.SymbolName}
@@ -1060,4 +1120,199 @@ func (s *Server) tryLoadRPG(ctx context.Context) (rpg.RPGStore, *rpg.QueryEngine
 	}
 	qe := rpg.NewQueryEngine(graph)
 	return rpgStore, qe, nil
+}
+
+// handleRPGSearch handles the grepai_rpg_search tool call.
+func (s *Server) handleRPGSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query, err := request.RequireString("query")
+	if err != nil {
+		return mcp.NewToolResultError("query parameter is required"), nil
+	}
+
+	scope := request.GetString("scope", "")
+	kindsStr := request.GetString("kinds", "")
+	limit := request.GetInt("limit", 10)
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Parse kinds
+	var kinds []rpg.NodeKind
+	if kindsStr != "" {
+		kindParts := strings.Split(kindsStr, ",")
+		for _, k := range kindParts {
+			k = strings.TrimSpace(k)
+			switch k {
+			case "area":
+				kinds = append(kinds, rpg.KindArea)
+			case "category":
+				kinds = append(kinds, rpg.KindCategory)
+			case "subcategory":
+				kinds = append(kinds, rpg.KindSubcategory)
+			case "file":
+				kinds = append(kinds, rpg.KindFile)
+			case "symbol":
+				kinds = append(kinds, rpg.KindSymbol)
+			case "chunk":
+				kinds = append(kinds, rpg.KindChunk)
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("invalid kind: %s", k)), nil
+			}
+		}
+	}
+
+	// Build request
+	req := rpg.SearchNodeRequest{
+		Query: query,
+		Scope: scope,
+		Kinds: kinds,
+		Limit: limit,
+	}
+
+	// Execute search
+	results, err := qe.SearchNode(ctx, req)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+	}
+
+	// Encode output
+	output, err := encodeOutput(results, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode results: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(output), nil
+}
+
+// handleRPGFetch handles the grepai_rpg_fetch tool call.
+func (s *Server) handleRPGFetch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	nodeID, err := request.RequireString("node_id")
+	if err != nil {
+		return mcp.NewToolResultError("node_id parameter is required"), nil
+	}
+
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Fetch node
+	result, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: nodeID})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("fetch failed: %v", err)), nil
+	}
+
+	if result == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("node not found: %s", nodeID)), nil
+	}
+
+	// Encode output
+	output, err := encodeOutput(result, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(output), nil
+}
+
+// handleRPGExplore handles the grepai_rpg_explore tool call.
+func (s *Server) handleRPGExplore(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	startNodeID, err := request.RequireString("start_node_id")
+	if err != nil {
+		return mcp.NewToolResultError("start_node_id parameter is required"), nil
+	}
+
+	direction := request.GetString("direction", "both")
+	depth := request.GetInt("depth", 2)
+	edgeTypesStr := request.GetString("edge_types", "")
+	limit := request.GetInt("limit", 100)
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Validate direction
+	if direction != "forward" && direction != "reverse" && direction != "both" {
+		return mcp.NewToolResultError("direction must be 'forward', 'reverse', or 'both'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Parse edge types
+	var edgeTypes []rpg.EdgeType
+	if edgeTypesStr != "" {
+		edgeParts := strings.Split(edgeTypesStr, ",")
+		for _, et := range edgeParts {
+			et = strings.TrimSpace(et)
+			switch et {
+			case "feature_parent":
+				edgeTypes = append(edgeTypes, rpg.EdgeFeatureParent)
+			case "contains":
+				edgeTypes = append(edgeTypes, rpg.EdgeContains)
+			case "invokes":
+				edgeTypes = append(edgeTypes, rpg.EdgeInvokes)
+			case "imports":
+				edgeTypes = append(edgeTypes, rpg.EdgeImports)
+			case "maps_to_chunk":
+				edgeTypes = append(edgeTypes, rpg.EdgeMapsToChunk)
+			case "semantic_sim":
+				edgeTypes = append(edgeTypes, rpg.EdgeSemanticSim)
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("invalid edge type: %s", et)), nil
+			}
+		}
+	}
+
+	// Build request
+	req := rpg.ExploreRequest{
+		StartNodeID: startNodeID,
+		Direction:   direction,
+		Depth:       depth,
+		EdgeTypes:   edgeTypes,
+		Limit:       limit,
+	}
+
+	// Execute exploration
+	result, err := qe.Explore(ctx, req)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("explore failed: %v", err)), nil
+	}
+
+	if result == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("start node not found: %s", startNodeID)), nil
+	}
+
+	// Encode output
+	output, err := encodeOutput(result, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(output), nil
 }

@@ -27,6 +27,7 @@ const (
 	EdgeInvokes       EdgeType = "invokes"        // symbol calls symbol
 	EdgeImports       EdgeType = "imports"        // file imports file/package
 	EdgeMapsToChunk   EdgeType = "maps_to_chunk"  // symbol maps to vector chunk
+	EdgeSemanticSim   EdgeType = "semantic_sim"   // symbols with similar features/co-call patterns
 )
 
 // Node represents a node in the RPG graph.
@@ -41,8 +42,9 @@ type Node struct {
 	StartLine  int       `json:"start_line,omitempty"`
 	EndLine    int       `json:"end_line,omitempty"`
 	Signature  string    `json:"signature,omitempty"` // function signature
-	ChunkID    string    `json:"chunk_id,omitempty"`  // linked vector chunk ID
-	UpdatedAt  time.Time `json:"updated_at"`
+	ChunkID       string    `json:"chunk_id,omitempty"`       // linked vector chunk ID
+	SemanticLabel string    `json:"semantic_label,omitempty"` // enriched label with semantic context
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // Edge represents a directed edge in the RPG graph.
