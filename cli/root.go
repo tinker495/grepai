@@ -44,6 +44,7 @@ func init() {
 	rootCmd.AddCommand(agentSetupCmd)
 	rootCmd.AddCommand(statusCmd)
 	rootCmd.AddCommand(workspaceCmd)
+	rootCmd.AddCommand(worktreeCmd)
 }
 
 var versionCmd = &cobra.Command{

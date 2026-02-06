@@ -29,7 +29,7 @@ func TestResolveMCPWorkspace(t *testing.T) {
 		})
 		config.SaveWorkspaceConfig(cfg)
 
-		projectRoot, wsName, err := resolveMCPTarget("", "orbix")
+		projectRoot, wsName, err := resolveMCPTarget("", "orbix", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -45,7 +45,7 @@ func TestResolveMCPWorkspace(t *testing.T) {
 		cleanup := setTestHomeDirCLI(t, tmpDir)
 		defer cleanup()
 
-		_, _, err := resolveMCPTarget("", "nonexistent")
+		_, _, err := resolveMCPTarget("", "nonexistent", false)
 		if err == nil {
 			t.Error("expected error for nonexistent workspace")
 		}
@@ -59,7 +59,7 @@ func TestResolveMCPWorkspace(t *testing.T) {
 		os.MkdirAll(grepaiDir, 0755)
 		os.WriteFile(filepath.Join(grepaiDir, "config.yaml"), []byte("version: 1\n"), 0644)
 
-		projectRoot, wsName, err := resolveMCPTarget(tmpDir, "")
+		projectRoot, wsName, err := resolveMCPTarget(tmpDir, "", false)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -75,7 +75,7 @@ func TestResolveMCPWorkspace(t *testing.T) {
 		tmpDir, _ := os.MkdirTemp("", "grepai-mcp-test")
 		defer os.RemoveAll(tmpDir)
 
-		_, _, err := resolveMCPTarget(tmpDir, "")
+		_, _, err := resolveMCPTarget(tmpDir, "", false)
 		if err == nil {
 			t.Error("expected error when no .grepai/ at path")
 		}

@@ -437,11 +437,9 @@ func (idx *Indexer) IndexFile(ctx context.Context, file FileInfo) (int, error) {
 
 	// Separate cached and uncached chunks
 	var uncachedChunks []ChunkInfo
-	var uncachedIndices []int
 	for i, chunk := range chunkInfos {
 		if _, ok := cachedVectors[i]; !ok {
 			uncachedChunks = append(uncachedChunks, chunk)
-			uncachedIndices = append(uncachedIndices, i)
 		}
 	}
 

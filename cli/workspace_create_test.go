@@ -211,7 +211,7 @@ func TestIntegration_WorkspaceCreateAndMCPResolve(t *testing.T) {
 	}
 
 	// Step 5: Verify MCP resolution with --workspace
-	projectRoot, wsName, err := resolveMCPTarget("", "orbix")
+	projectRoot, wsName, err := resolveMCPTarget("", "orbix", false)
 	if err != nil {
 		t.Fatalf("resolveMCPTarget --workspace: %v", err)
 	}

@@ -31,10 +31,13 @@ Arguments:
 Flags:
   --workspace   Workspace name. When set, serves using workspace config from
                 ~/.grepai/workspace.yaml without requiring local .grepai/.
+  --worktree-group  Auto-detect worktree group from current git repo and
+                    serve all worktrees. Requires 'grepai worktree init'.
 
 Configuration for Claude Code:
   claude mcp add grepai -- grepai mcp-serve
   claude mcp add grepai -- grepai mcp-serve --workspace myworkspace
+  claude mcp add grepai -- grepai mcp-serve --worktree-group
 
 Configuration for Cursor (.cursor/mcp.json):
   {
@@ -61,13 +64,14 @@ Configuration for Cursor with explicit path (recommended for Windows):
 
 func init() {
 	mcpServeCmd.Flags().String("workspace", "", "Workspace name for workspace-only mode (no local .grepai/ required)")
+	mcpServeCmd.Flags().Bool("worktree-group", false, "Auto-detect and serve worktree group (no manual config needed)")
 	rootCmd.AddCommand(mcpServeCmd)
 }
 
 // resolveMCPTarget determines the project root and/or workspace for the MCP server.
 // Returns (projectRoot, workspaceName, error).
 // projectRoot may be empty when in workspace-only mode.
-func resolveMCPTarget(explicitPath, workspaceName string) (string, string, error) {
+func resolveMCPTarget(explicitPath, workspaceName string, useWorktreeGroup bool) (string, string, error) {
 	// Priority 1: Explicit --workspace flag
 	if workspaceName != "" {
 		cfg, err := config.LoadWorkspaceConfig()
@@ -111,6 +115,29 @@ func resolveMCPTarget(explicitPath, workspaceName string) (string, string, error
 		return projectRoot, "", nil
 	}
 
+	// Priority 3.5: Worktree group detection
+	if useWorktreeGroup {
+		cwd, cwdErr := os.Getwd()
+		if cwdErr == nil {
+			_, wtCfg, wtErr := config.FindWorktreeGroupForPath(cwd)
+			if wtErr == nil && wtCfg != nil {
+				// Convert worktree group to workspace
+				ws := config.WorktreeGroupToWorkspace(wtCfg)
+				// Register as temporary workspace
+				wsCfg, loadErr := config.LoadWorkspaceConfig()
+				if loadErr == nil {
+					if wsCfg == nil {
+						wsCfg = config.DefaultWorkspaceConfig()
+					}
+					delete(wsCfg.Workspaces, ws.Name)
+					_ = wsCfg.AddWorkspace(*ws)
+					_ = config.SaveWorkspaceConfig(wsCfg)
+				}
+				return "", ws.Name, nil
+			}
+		}
+	}
+
 	// Priority 4: Auto-detect workspace from cwd
 	cwd, cwdErr := os.Getwd()
 	if cwdErr != nil {
@@ -130,13 +157,14 @@ func resolveMCPTarget(explicitPath, workspaceName string) (string, string, error
 
 func runMCPServe(cmd *cobra.Command, args []string) error {
 	workspaceFlag, _ := cmd.Flags().GetString("workspace")
+	worktreeGroupFlag, _ := cmd.Flags().GetBool("worktree-group")
 
 	var explicitPath string
 	if len(args) > 0 {
 		explicitPath = args[0]
 	}
 
-	projectRoot, wsName, err := resolveMCPTarget(explicitPath, workspaceFlag)
+	projectRoot, wsName, err := resolveMCPTarget(explicitPath, workspaceFlag, worktreeGroupFlag)
 	if err != nil {
 		return err
 	}

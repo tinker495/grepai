@@ -57,9 +57,9 @@ import (
 )
 
 const (
-	pidFileName   = "grepai-watch.pid"
-	logFileName   = "grepai-watch.log"
-	readyFileName = "grepai-watch.ready"
+	pidFileName         = "grepai-watch.pid"
+	logFileName         = "grepai-watch.log"
+	readyFileName       = "grepai-watch.ready"
 	worktreePIDPrefix   = "grepai-worktree-"
 	worktreePIDSuffix   = ".pid"
 	worktreeLogPrefix   = "grepai-worktree-"
