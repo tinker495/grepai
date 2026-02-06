@@ -12,7 +12,7 @@ import (
 )
 
 type GOBStore struct {
-	indexPath     string
+	indexPath string
 	lockPath  string
 	chunks    map[string]Chunk    // id -> chunk
 	documents map[string]Document // path -> document
