@@ -14,12 +14,13 @@ const (
 )
 
 type ChunkInfo struct {
-	ID        string
-	FilePath  string
-	StartLine int
-	EndLine   int
-	Content   string
-	Hash      string
+	ID          string
+	FilePath    string
+	StartLine   int
+	EndLine     int
+	Content     string
+	Hash        string
+	ContentHash string // SHA256 of raw content text (without file path prefix)
 }
 
 type Chunker struct {
@@ -89,15 +90,17 @@ func (c *Chunker) Chunk(filePath string, content string) []ChunkInfo {
 
 		// Generate chunk ID
 		hash := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d:%s", filePath, pos, end, chunkContent)))
+		contentHash := sha256.Sum256([]byte(chunkContent))
 		chunkID := fmt.Sprintf("%s_%d", filePath, chunkIndex)
 
 		chunks = append(chunks, ChunkInfo{
-			ID:        chunkID,
-			FilePath:  filePath,
-			StartLine: startLine,
-			EndLine:   endLine,
-			Content:   chunkContent,
-			Hash:      hex.EncodeToString(hash[:8]),
+			ID:          chunkID,
+			FilePath:    filePath,
+			StartLine:   startLine,
+			EndLine:     endLine,
+			Content:     chunkContent,
+			Hash:        hex.EncodeToString(hash[:8]),
+			ContentHash: hex.EncodeToString(contentHash[:]),
 		})
 
 		chunkIndex++
@@ -218,6 +221,7 @@ func (c *Chunker) ReChunk(parent ChunkInfo, parentIndex int) []ChunkInfo {
 
 		// Generate sub-chunk ID: file.go_parentIndex_subIndex
 		hash := sha256.Sum256([]byte(fmt.Sprintf("%s:%d:%d:%d:%s", parent.FilePath, parentIndex, subIndex, pos, chunkContent)))
+		contentHash := sha256.Sum256([]byte(chunkContent))
 		subChunkID := fmt.Sprintf("%s_%d_%d", parent.FilePath, parentIndex, subIndex)
 
 		// Re-add file context if it was present in the parent
@@ -227,12 +231,13 @@ func (c *Chunker) ReChunk(parent ChunkInfo, parentIndex int) []ChunkInfo {
 		}
 
 		subChunks = append(subChunks, ChunkInfo{
-			ID:        subChunkID,
-			FilePath:  parent.FilePath,
-			StartLine: absoluteStartLine,
-			EndLine:   absoluteEndLine,
-			Content:   finalContent,
-			Hash:      hex.EncodeToString(hash[:8]),
+			ID:          subChunkID,
+			FilePath:    parent.FilePath,
+			StartLine:   absoluteStartLine,
+			EndLine:     absoluteEndLine,
+			Content:     finalContent,
+			Hash:        hex.EncodeToString(hash[:8]),
+			ContentHash: hex.EncodeToString(contentHash[:]),
 		})
 
 		subIndex++
