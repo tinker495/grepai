@@ -484,14 +484,10 @@ func SpawnWorktreeBackground(logDir, worktreeID string, extraArgs []string) (int
 		return 0, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	// Build args for background process
-	args := []string{"watch"}
-	args = append(args, extraArgs...)
-
 	// Use worktree-specific log file
 	logPath := GetWorktreeLogFile(logDir, worktreeID)
 
-	return spawnBackgroundWithLog(logDir, logPath, args)
+	return spawnBackgroundWithLog(logDir, logPath, extraArgs)
 }
 
 // spawnBackgroundWithLog spawns a background process with a custom log file.

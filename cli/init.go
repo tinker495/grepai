@@ -86,7 +86,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 					fmt.Println("\nNote: GOB backend creates an independent index per worktree.")
 					fmt.Println("For shared indexing across worktrees, consider using 'postgres' or 'qdrant' backend.")
 				} else {
-					fmt.Printf("\nUsing shared backend (%s) - worktrees will share the same index.\n", cfg.Store.Backend)
+					fmt.Printf("\nUsing %s backend - each worktree maintains its own project scope within the shared store.\n", cfg.Store.Backend)
 				}
 			}
 		} else {

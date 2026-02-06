@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -574,7 +575,9 @@ func discoverWorktreesForWatch(projectRoot string) []string {
 
 // watchProject runs the full watch pipeline for a single project directory.
 // The embedder is shared across all projects to avoid duplicate connections.
-func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder, isBackgroundChild bool) error {
+// watchProject runs the full watch lifecycle for a single project.
+// If onReady is non-nil, it is called once after initial indexing and watcher start.
+func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder, isBackgroundChild bool, onReady func()) error {
 	// Load configuration
 	cfg, err := config.Load(projectRoot)
 	if err != nil {
@@ -645,6 +648,10 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 
 	if err := w.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start watcher for %s: %w", projectRoot, err)
+	}
+
+	if onReady != nil {
+		onReady()
 	}
 
 	// Run watch loop (responds to ctx.Done() for graceful shutdown)
@@ -897,44 +904,51 @@ func runWatchForeground() error {
 	// Multi-worktree mode: run all projects in parallel using errgroup
 	g, gCtx := errgroup.WithContext(watchCtx)
 
+	// WaitGroup to track when all projects finish initial indexing + watcher start
+	var readyWg sync.WaitGroup
+	totalProjects := 1 + len(linkedWorktrees)
+	readyWg.Add(totalProjects)
+
+	onReady := func() { readyWg.Done() }
+
 	// Main project
 	g.Go(func() error {
-		return watchProject(gCtx, projectRoot, emb, true) // always background-style logging
+		return watchProject(gCtx, projectRoot, emb, true, onReady)
 	})
 
 	// Linked worktrees
 	for _, wt := range linkedWorktrees {
 		wt := wt
 		g.Go(func() error {
-			return watchProject(gCtx, wt, emb, true)
+			return watchProject(gCtx, wt, emb, true, onReady)
 		})
 	}
 
-	// Write ready file after all watchers started
-	if isBackgroundChild {
-		if worktreeID != "" {
-			if err := daemon.WriteWorktreeReadyFile(logDir, worktreeID); err != nil {
-				return fmt.Errorf("failed to write ready file: %w", err)
+	// Write ready file after all watchers have actually started
+	g.Go(func() error {
+		readyWg.Wait()
+		if isBackgroundChild {
+			if worktreeID != "" {
+				return daemon.WriteWorktreeReadyFile(logDir, worktreeID)
 			}
-			defer func() {
+			return daemon.WriteReadyFile(logDir)
+		}
+		fmt.Printf("\nWatching %d projects for changes... (Press Ctrl+C to stop)\n", totalProjects)
+		return nil
+	})
+
+	if isBackgroundChild {
+		defer func() {
+			if worktreeID != "" {
 				if err := daemon.RemoveWorktreeReadyFile(logDir, worktreeID); err != nil {
 					log.Printf("Warning: failed to remove ready file on exit: %v", err)
 				}
-			}()
-		} else {
-			if err := daemon.WriteReadyFile(logDir); err != nil {
-				return fmt.Errorf("failed to write ready file: %w", err)
-			}
-			defer func() {
+			} else {
 				if err := daemon.RemoveReadyFile(logDir); err != nil {
 					log.Printf("Warning: failed to remove ready file on exit: %v", err)
 				}
-			}()
-		}
-	}
-
-	if !isBackgroundChild {
-		fmt.Printf("\nWatching %d projects for changes... (Press Ctrl+C to stop)\n", len(linkedWorktrees)+1)
+			}
+		}()
 	}
 
 	return g.Wait()
