@@ -97,7 +97,7 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 				Receiver:   sym.Receiver,
 				Language:   sym.Language,
 				StartLine:  sym.Line,
-				EndLine:    sym.EndLine,
+				EndLine:    normalizeEndLine(sym.Line, sym.EndLine),
 				Signature:  sym.Signature,
 				UpdatedAt:  time.Now(),
 			}
@@ -288,6 +288,16 @@ func findSymbolNodeID(graph *Graph, symbolName, filePath string, line int) strin
 	}
 
 	return ""
+}
+
+// normalizeEndLine returns endLine if it's valid, otherwise falls back to
+// startLine. The regex-based trace extractor does not populate EndLine, so
+// this prevents overlap checks from always failing when EndLine is 0.
+func normalizeEndLine(startLine, endLine int) int {
+	if endLine <= 0 || endLine < startLine {
+		return startLine
+	}
+	return endLine
 }
 
 // overlaps checks if two line ranges overlap.

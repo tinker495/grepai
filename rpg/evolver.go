@@ -97,7 +97,7 @@ func (ev *Evolver) HandleModify(filePath string, symbols []trace.Symbol) {
 				existing.Feature = newFeature
 				existing.Signature = sym.Signature
 				existing.StartLine = sym.Line
-				existing.EndLine = sym.EndLine
+				existing.EndLine = normalizeEndLine(sym.Line, sym.EndLine)
 				existing.UpdatedAt = now
 			} else {
 				// Semantic drift: remove old node and re-create with new
@@ -180,7 +180,7 @@ func (ev *Evolver) addSymbolNode(filePath string, sym trace.Symbol, feature stri
 		Receiver:   sym.Receiver,
 		Language:   sym.Language,
 		StartLine:  sym.Line,
-		EndLine:    sym.EndLine,
+		EndLine:    normalizeEndLine(sym.Line, sym.EndLine),
 		Signature:  sym.Signature,
 		UpdatedAt:  now,
 	}
