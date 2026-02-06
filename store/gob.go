@@ -12,10 +12,13 @@ import (
 )
 
 type GOBStore struct {
-	indexPath string
-	chunks    map[string]Chunk    // id -> chunk
-	documents map[string]Document // path -> document
-	mu        sync.RWMutex
+	indexPath     string
+	lockPath      string
+	secondaryPath string              // optional: read-only GOB for cross-worktree cache
+	chunks        map[string]Chunk    // id -> chunk
+	documents     map[string]Document // path -> document
+	secondary     map[string]Chunk    // read-only chunks from secondary GOB
+	mu            sync.RWMutex
 }
 
 type gobData struct {
@@ -26,8 +29,22 @@ type gobData struct {
 func NewGOBStore(indexPath string) *GOBStore {
 	return &GOBStore{
 		indexPath: indexPath,
+		lockPath:  indexPath + ".lock",
 		chunks:    make(map[string]Chunk),
 		documents: make(map[string]Document),
+	}
+}
+
+// NewGOBStoreWithSecondary creates a GOBStore with a secondary read-only GOB file
+// for cross-worktree embedding cache lookups. The secondary GOB is loaded once
+// during Load() and used only for LookupByContentHash.
+func NewGOBStoreWithSecondary(indexPath, secondaryPath string) *GOBStore {
+	return &GOBStore{
+		indexPath:     indexPath,
+		lockPath:      indexPath + ".lock",
+		secondaryPath: secondaryPath,
+		chunks:        make(map[string]Chunk),
+		documents:     make(map[string]Document),
 	}
 }
 
@@ -128,10 +145,35 @@ func (s *GOBStore) Load(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Acquire shared (read) file lock for cross-process safety
+	lockFile, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		// If we can't create lock file, proceed without locking (backward compat)
+		return s.loadUnlocked()
+	}
+	defer lockFile.Close()
+
+	if err := flockShared(lockFile); err != nil {
+		// If locking fails, proceed without locking (backward compat)
+		return s.loadUnlocked()
+	}
+	defer func() {
+		_ = funlock(lockFile)
+	}()
+
+	return s.loadUnlocked()
+}
+
+// loadUnlocked performs the actual load without any locking.
+func (s *GOBStore) loadUnlocked() error {
 	file, err := os.Open(s.indexPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil // No existing index, start fresh
+			// No existing index, start fresh (but still load secondary if configured)
+			if s.secondaryPath != "" && s.secondaryPath != s.indexPath {
+				s.secondary = s.loadSecondaryChunks()
+			}
+			return nil
 		}
 		return fmt.Errorf("failed to open index file: %w", err)
 	}
@@ -153,6 +195,11 @@ func (s *GOBStore) Load(ctx context.Context) error {
 		s.documents = make(map[string]Document)
 	}
 
+	// Load secondary GOB for cross-worktree cache (read-only, best-effort)
+	if s.secondaryPath != "" && s.secondaryPath != s.indexPath {
+		s.secondary = s.loadSecondaryChunks()
+	}
+
 	return nil
 }
 
@@ -160,6 +207,27 @@ func (s *GOBStore) Persist(ctx context.Context) error {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Acquire exclusive (write) file lock for cross-process safety
+	lockFile, err := os.OpenFile(s.lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		// If we can't create lock file, proceed without locking (backward compat)
+		return s.persistUnlocked()
+	}
+	defer lockFile.Close()
+
+	if err := flockExclusive(lockFile); err != nil {
+		// If locking fails, proceed without locking (backward compat)
+		return s.persistUnlocked()
+	}
+	defer func() {
+		_ = funlock(lockFile)
+	}()
+
+	return s.persistUnlocked()
+}
+
+// persistUnlocked performs the actual persist without any locking.
+func (s *GOBStore) persistUnlocked() error {
 	file, err := os.Create(s.indexPath)
 	if err != nil {
 		return fmt.Errorf("failed to create index file: %w", err)
@@ -259,13 +327,23 @@ func (s *GOBStore) GetAllChunks(ctx context.Context) ([]Chunk, error) {
 }
 
 // LookupByContentHash searches in-memory chunks for a matching content hash.
+// Also checks the secondary (read-only) GOB if configured.
 func (s *GOBStore) LookupByContentHash(ctx context.Context, contentHash string) ([]float32, bool, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
+	// Check primary chunks first
 	for _, chunk := range s.chunks {
 		if chunk.ContentHash == contentHash && len(chunk.Vector) > 0 {
-			// Return a copy to avoid mutation
+			vec := make([]float32, len(chunk.Vector))
+			copy(vec, chunk.Vector)
+			return vec, true, nil
+		}
+	}
+
+	// Check secondary (read-only) chunks
+	for _, chunk := range s.secondary {
+		if chunk.ContentHash == contentHash && len(chunk.Vector) > 0 {
 			vec := make([]float32, len(chunk.Vector))
 			copy(vec, chunk.Vector)
 			return vec, true, nil
@@ -273,6 +351,24 @@ func (s *GOBStore) LookupByContentHash(ctx context.Context, contentHash string) 
 	}
 
 	return nil, false, nil
+}
+
+// loadSecondaryChunks loads chunks from the secondary GOB file (read-only).
+// Errors are silently ignored - the secondary cache is best-effort.
+func (s *GOBStore) loadSecondaryChunks() map[string]Chunk {
+	file, err := os.Open(s.secondaryPath)
+	if err != nil {
+		return nil
+	}
+	defer file.Close()
+
+	var data gobData
+	decoder := gob.NewDecoder(file)
+	if err := decoder.Decode(&data); err != nil {
+		return nil
+	}
+
+	return data.Chunks
 }
 
 // cosineSimilarity calculates the cosine similarity between two vectors
