@@ -334,7 +334,7 @@ func (c *Config) applyDefaults() {
 	if c.RPG.FeatureMode == "" {
 		c.RPG.FeatureMode = "local"
 	}
-	if c.RPG.DriftThreshold <= 0 {
+	if c.RPG.DriftThreshold < 0 {
 		c.RPG.DriftThreshold = 0.35
 	}
 	if c.RPG.MaxTraversalDepth <= 0 {

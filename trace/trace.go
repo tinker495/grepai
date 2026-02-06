@@ -153,6 +153,12 @@ type SymbolStore interface {
 	// Persist writes the index to storage.
 	Persist(ctx context.Context) error
 
+	// GetSymbolsForFile returns all symbols defined in a specific file.
+	GetSymbolsForFile(ctx context.Context, filePath string) ([]Symbol, error)
+
+	// GetCallEdges returns all call graph edges.
+	GetCallEdges(ctx context.Context) ([]CallEdge, error)
+
 	// Close shuts down the store.
 	Close() error
 

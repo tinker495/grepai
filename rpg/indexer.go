@@ -47,8 +47,10 @@ func NewRPGIndexer(rpgStore RPGStore, extractor FeatureExtractor, projectRoot st
 func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolStore, vectorStore store.VectorStore) error {
 	graph := idx.store.GetGraph()
 
-	// Clear existing graph
-	graph = NewGraph()
+	// Clear existing graph data in-place (not reassigning the pointer)
+	graph.Nodes = make(map[string]*Node)
+	graph.Edges = make([]*Edge, 0)
+	graph.RebuildIndexes()
 
 	// Get all documents from vector store to know which files to process
 	docs, err := vectorStore.ListDocuments(ctx)
@@ -77,27 +79,64 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 		}
 		graph.AddNode(fileNode)
 
-		// Get all symbols from this file
-		// We'll need to query the symbol store - since SymbolStore doesn't have a ListSymbolsForFile,
-		// we'll get all chunks for the file and extract symbols that overlap
-		chunks, err := vectorStore.GetChunksForFile(ctx, filePath)
-		if err != nil {
-			return fmt.Errorf("failed to get chunks for file %s: %w", filePath, err)
+		// Get symbols for this file from the symbol store
+		symbols, symErr := symbolStore.GetSymbolsForFile(ctx, filePath)
+		if symErr != nil {
+			continue
 		}
 
-		// Since SymbolStore doesn't provide a ListSymbolsForFile method,
-		// we'll skip symbol extraction during BuildFull
-		// Symbols will be populated incrementally through HandleFileEvent
-		// when the watcher processes files with actual trace data
+		for _, sym := range symbols {
+			feature := idx.extractor.ExtractFeature(sym.Name, sym.Signature, sym.Receiver, "")
+			nodeID := makeSymbolNodeID(filePath, sym)
+			symNode := &Node{
+				ID:         nodeID,
+				Kind:       KindSymbol,
+				Feature:    feature,
+				Path:       filePath,
+				SymbolName: sym.Name,
+				Receiver:   sym.Receiver,
+				Language:   sym.Language,
+				StartLine:  sym.Line,
+				EndLine:    sym.EndLine,
+				Signature:  sym.Signature,
+				UpdatedAt:  time.Now(),
+			}
+			graph.AddNode(symNode)
 
-		// Store chunks for later linking (after symbols are added)
-		_ = chunks // Used in Step 4 below
+			// Link file -> symbol via EdgeContains
+			graph.AddEdge(&Edge{
+				From:      fileNodeID,
+				To:        nodeID,
+				Type:      EdgeContains,
+				Weight:    1.0,
+				UpdatedAt: time.Now(),
+			})
+		}
 	}
 
 	// Step 2: Wire invocation edges from call graph
-	// Note: Since SymbolStore doesn't provide a way to list all symbols,
-	// we rely on incremental updates through HandleFileEvent to populate the graph
-	// The evolver will wire up call edges when symbols are added
+	callEdges, callErr := symbolStore.GetCallEdges(ctx)
+	if callErr == nil {
+		for _, ce := range callEdges {
+			callerID := findSymbolNodeID(graph, ce.Caller, ce.File, ce.Line)
+			// For callee, look up in all files
+			calleeNodes := graph.GetNodesByKind(KindSymbol)
+			for _, cn := range calleeNodes {
+				if cn.SymbolName == ce.Callee {
+					if callerID != "" {
+						graph.AddEdge(&Edge{
+							From:      callerID,
+							To:        cn.ID,
+							Type:      EdgeInvokes,
+							Weight:    1.0,
+							UpdatedAt: time.Now(),
+						})
+					}
+					break
+				}
+			}
+		}
+	}
 
 	// Step 3: Wire import edges from references
 	// We'll analyze references to detect imports
@@ -130,7 +169,9 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 // HandleFileEvent handles incremental updates for file events.
 func (idx *RPGIndexer) HandleFileEvent(ctx context.Context, eventType string, filePath string, symbols []trace.Symbol) error {
 	switch strings.ToLower(eventType) {
-	case "create", "modify":
+	case "create":
+		idx.evolver.HandleAdd(filePath, symbols)
+	case "modify":
 		idx.evolver.HandleModify(filePath, symbols)
 	case "delete":
 		idx.evolver.HandleDelete(filePath)

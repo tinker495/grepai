@@ -30,13 +30,12 @@ type LLMExtractor struct {
 
 // NewLLMExtractor creates an LLM-based feature extractor with local fallback.
 func NewLLMExtractor(cfg LLMExtractorConfig) *LLMExtractor {
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = 8 * time.Second
+	if cfg.Timeout <= 0 {
+		cfg.Timeout = 8 * time.Second
 	}
 	return &LLMExtractor{
 		cfg:      cfg,
-		client:   &http.Client{Timeout: timeout},
+		client:   &http.Client{Timeout: cfg.Timeout},
 		fallback: NewLocalExtractor(),
 	}
 }

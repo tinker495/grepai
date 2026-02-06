@@ -556,7 +556,19 @@ func runWatchForeground() error {
 			log.Printf("Warning: failed to load RPG index: %v", err)
 		}
 
-		featureExtractor := rpg.NewLocalExtractor()
+		var featureExtractor rpg.FeatureExtractor
+		switch cfg.RPG.FeatureMode {
+		case "llm", "hybrid":
+			featureExtractor = rpg.NewLLMExtractor(rpg.LLMExtractorConfig{
+				Provider: cfg.RPG.LLMProvider,
+				Model:    cfg.RPG.LLMModel,
+				Endpoint: cfg.RPG.LLMEndpoint,
+				APIKey:   cfg.RPG.LLMAPIKey,
+				Timeout:  time.Duration(cfg.RPG.LLMTimeoutMs) * time.Millisecond,
+			})
+		default: // "local" or empty
+			featureExtractor = rpg.NewLocalExtractor()
+		}
 		rpgIndexer = rpg.NewRPGIndexer(rpgStore, featureExtractor, projectRoot, rpg.RPGIndexerConfig{
 			DriftThreshold:    cfg.RPG.DriftThreshold,
 			MaxTraversalDepth: cfg.RPG.MaxTraversalDepth,

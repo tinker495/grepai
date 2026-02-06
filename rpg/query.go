@@ -302,34 +302,31 @@ func (qe *QueryEngine) Explore(_ context.Context, req ExploreRequest) (*ExploreR
 	return result, nil
 }
 
-// getFeaturePath walks up the hierarchy from a node to build its feature path
-// string ("area/category/subcategory"). It follows EdgeFeatureParent and
-// EdgeContains edges upward through the hierarchy.
+// getFeaturePath returns the full feature path for a node.
+// Hierarchy nodes (area/category/subcategory) already store their full path in Feature.
+// Non-hierarchy nodes (symbol/file/chunk) get their path from their hierarchy parent.
 func (qe *QueryEngine) getFeaturePath(nodeID string) string {
-	var parts []string
-	visited := make(map[string]bool)
-	current := nodeID
-
-	for {
-		parentID := findParentID(qe.graph, current)
-		if parentID == "" || visited[parentID] {
-			break
-		}
-		visited[parentID] = true
-		parentNode := qe.graph.GetNode(parentID)
-		if parentNode == nil {
-			break
-		}
-		parts = append(parts, parentNode.Feature)
-		current = parentID
+	node := qe.graph.GetNode(nodeID)
+	if node == nil {
+		return ""
 	}
 
-	// Parts are collected child-to-root; reverse for root-to-leaf.
-	for i, j := 0, len(parts)-1; i < j; i, j = i+1, j-1 {
-		parts[i], parts[j] = parts[j], parts[i]
+	// Hierarchy nodes already store the full path in Feature
+	if node.Kind == KindArea || node.Kind == KindCategory || node.Kind == KindSubcategory {
+		return node.Feature
 	}
 
-	return strings.Join(parts, "/")
+	// For non-hierarchy nodes, find the first hierarchy parent
+	for _, e := range qe.graph.GetOutgoing(nodeID) {
+		if e.Type == EdgeFeatureParent {
+			parent := qe.graph.GetNode(e.To)
+			if parent != nil {
+				return parent.Feature
+			}
+		}
+	}
+
+	return ""
 }
 
 // findParentID finds the hierarchy parent of a node by looking at outgoing

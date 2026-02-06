@@ -684,3 +684,45 @@ func TestFindParentID(t *testing.T) {
 		t.Errorf("Expected empty parent, got %s", noParent)
 	}
 }
+
+func TestGetFeaturePath(t *testing.T) {
+	g := NewGraph()
+
+	// Create hierarchy: area "cli" → category "cli/watch" → subcategory "cli/watch/handle"
+	area := &Node{ID: "area:cli", Kind: KindArea, Feature: "cli"}
+	cat := &Node{ID: "cat:cli/watch", Kind: KindCategory, Feature: "cli/watch"}
+	subcat := &Node{ID: "subcat:cli/watch/handle", Kind: KindSubcategory, Feature: "cli/watch/handle"}
+	sym := &Node{ID: "sym:cli/watch.go:HandleEvent", Kind: KindSymbol, Feature: "handle-event", Path: "cli/watch.go", SymbolName: "HandleEvent"}
+
+	g.AddNode(area)
+	g.AddNode(cat)
+	g.AddNode(subcat)
+	g.AddNode(sym)
+
+	// Edges: cat→area, subcat→cat, sym→subcat
+	g.AddEdge(&Edge{From: cat.ID, To: area.ID, Type: EdgeContains})
+	g.AddEdge(&Edge{From: subcat.ID, To: cat.ID, Type: EdgeContains})
+	g.AddEdge(&Edge{From: sym.ID, To: subcat.ID, Type: EdgeFeatureParent})
+
+	qe := NewQueryEngine(g)
+
+	tests := []struct {
+		name     string
+		nodeID   string
+		expected string
+	}{
+		{"area returns own feature", area.ID, "cli"},
+		{"category returns own feature", cat.ID, "cli/watch"},
+		{"subcategory returns own feature", subcat.ID, "cli/watch/handle"},
+		{"symbol returns parent feature path", sym.ID, "cli/watch/handle"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := qe.getFeaturePath(tt.nodeID)
+			if got != tt.expected {
+				t.Errorf("getFeaturePath(%q) = %q, want %q", tt.nodeID, got, tt.expected)
+			}
+		})
+	}
+}
