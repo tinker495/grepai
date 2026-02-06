@@ -175,6 +175,7 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 }
 
 // HandleFileEvent handles incremental updates for file events.
+// The caller is responsible for persisting the store after updates.
 func (idx *RPGIndexer) HandleFileEvent(ctx context.Context, eventType string, filePath string, symbols []trace.Symbol) error {
 	switch strings.ToLower(eventType) {
 	case "create":
@@ -187,25 +188,16 @@ func (idx *RPGIndexer) HandleFileEvent(ctx context.Context, eventType string, fi
 		return fmt.Errorf("unknown event type: %s", eventType)
 	}
 
-	// Persist after update
-	if err := idx.store.Persist(ctx); err != nil {
-		return fmt.Errorf("failed to persist RPG store: %w", err)
-	}
-
 	return nil
 }
 
 // LinkChunksForFile links vector chunks to overlapping symbols in the graph.
+// The caller is responsible for persisting the store after updates.
 func (idx *RPGIndexer) LinkChunksForFile(ctx context.Context, filePath string, chunks []store.Chunk) error {
 	graph := idx.store.GetGraph()
 
 	if err := idx.linkChunksToSymbols(graph, filePath, chunks); err != nil {
 		return fmt.Errorf("failed to link chunks: %w", err)
-	}
-
-	// Persist after linking
-	if err := idx.store.Persist(ctx); err != nil {
-		return fmt.Errorf("failed to persist RPG store: %w", err)
 	}
 
 	return nil

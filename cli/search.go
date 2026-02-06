@@ -97,7 +97,7 @@ func enrichWithRPG(projectRoot string, cfg *config.Config, results []store.Searc
 		nodes := graph.GetNodesByFile(r.Chunk.FilePath)
 		for _, n := range nodes {
 			// Find symbol node that overlaps with the chunk's line range
-			if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.StartLine && n.EndLine >= r.Chunk.StartLine {
+			if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.EndLine && r.Chunk.StartLine <= n.EndLine {
 				// Found overlapping symbol node
 				fetchResult, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
 				if err == nil && fetchResult != nil {
