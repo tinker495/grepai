@@ -904,15 +904,21 @@ func runWatchForeground() error {
 	// Multi-worktree mode: run all projects in parallel using errgroup
 	g, gCtx := errgroup.WithContext(watchCtx)
 
-	// WaitGroup to track when all projects finish initial indexing + watcher start
+	// WaitGroup to track when all projects finish initial indexing + watcher start.
+	// Each goroutine uses sync.Once to guarantee exactly one Done() call, even on error.
 	var readyWg sync.WaitGroup
 	totalProjects := 1 + len(linkedWorktrees)
 	readyWg.Add(totalProjects)
 
-	onReady := func() { readyWg.Done() }
+	makeOnReady := func() func() {
+		var once sync.Once
+		return func() { once.Do(readyWg.Done) }
+	}
 
 	// Main project
 	g.Go(func() error {
+		onReady := makeOnReady()
+		defer onReady() // ensure Done() even if watchProject fails before calling onReady
 		return watchProject(gCtx, projectRoot, emb, true, onReady)
 	})
 
@@ -920,13 +926,26 @@ func runWatchForeground() error {
 	for _, wt := range linkedWorktrees {
 		wt := wt
 		g.Go(func() error {
+			onReady := makeOnReady()
+			defer onReady()
 			return watchProject(gCtx, wt, emb, true, onReady)
 		})
 	}
 
-	// Write ready file after all watchers have actually started
+	// Write ready file after all watchers have actually started (or failed).
+	// Uses select to also unblock on context cancellation.
 	g.Go(func() error {
-		readyWg.Wait()
+		done := make(chan struct{})
+		go func() {
+			readyWg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+			// All projects signaled ready (success or failure)
+		case <-gCtx.Done():
+			return gCtx.Err()
+		}
 		if isBackgroundChild {
 			if worktreeID != "" {
 				return daemon.WriteWorktreeReadyFile(logDir, worktreeID)
