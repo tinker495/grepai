@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **RPG (Repository Program Graph)**: Semantic graph layer for structural code understanding
+  - Builds a hierarchical graph of areas, categories, files, symbols, and chunks
+  - Feature extraction: local heuristic (verb-object from names) or optional LLM-based
+  - 3-level hierarchy: area/category/subcategory from directory structure
+  - Incremental evolution with Jaccard-based drift detection
+  - Integrated into `grepai watch` - graph builds automatically when enabled
+  - New config section `rpg:` with `enabled`, `feature_mode`, `drift_threshold`, `max_traversal_depth`
+  - MCP tools: `grepai_rpg_search`, `grepai_rpg_explore`, `grepai_rpg_node`
+  - Gated by `rpg.enabled: true` in config (default: false)
+
 ## [0.27.0] - 2026-02-04
 
 ### Added

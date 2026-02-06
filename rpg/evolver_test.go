@@ -174,7 +174,7 @@ func TestHandleModify(t *testing.T) {
 	// HandleRequest should still exist (low drift, in-place update)
 	sym1After := g.GetNode("sym:server.go:HandleRequest")
 	if sym1After == nil {
-		t.Error("Symbol 'HandleRequest' should still exist after low-drift modification")
+		t.Fatal("Symbol 'HandleRequest' should still exist after low-drift modification")
 	}
 	if sym1After.Signature != "func HandleRequest(ctx context.Context)" {
 		t.Error("Symbol signature should be updated")

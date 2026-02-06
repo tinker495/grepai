@@ -33,11 +33,11 @@ const (
 type Node struct {
 	ID         string    `json:"id"`
 	Kind       NodeKind  `json:"kind"`
-	Feature    string    `json:"feature"`              // semantic feature label (verb-object)
-	Path       string    `json:"path,omitempty"`       // file path (for file/symbol/chunk nodes)
+	Feature    string    `json:"feature"`               // semantic feature label (verb-object)
+	Path       string    `json:"path,omitempty"`        // file path (for file/symbol/chunk nodes)
 	SymbolName string    `json:"symbol_name,omitempty"` // symbol name (for symbol nodes)
-	Receiver   string    `json:"receiver,omitempty"`   // Go receiver type
-	Language   string    `json:"language,omitempty"`   // programming language
+	Receiver   string    `json:"receiver,omitempty"`    // Go receiver type
+	Language   string    `json:"language,omitempty"`    // programming language
 	StartLine  int       `json:"start_line,omitempty"`
 	EndLine    int       `json:"end_line,omitempty"`
 	Signature  string    `json:"signature,omitempty"` // function signature
@@ -61,10 +61,10 @@ type Graph struct {
 
 	// Indexes for fast lookup (not serialized)
 	byKind        map[NodeKind][]*Node
-	byFile        map[string][]*Node  // path -> nodes in that file
-	byFeaturePath map[string]*Node    // feature path -> hierarchy node
-	adjForward    map[string][]*Edge  // from -> outgoing edges
-	adjReverse    map[string][]*Edge  // to -> incoming edges
+	byFile        map[string][]*Node // path -> nodes in that file
+	byFeaturePath map[string]*Node   // feature path -> hierarchy node
+	adjForward    map[string][]*Edge // from -> outgoing edges
+	adjReverse    map[string][]*Edge // to -> incoming edges
 }
 
 // GraphStats holds graph statistics.

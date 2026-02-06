@@ -40,9 +40,9 @@ type FetchNodeResult struct {
 type ExploreRequest struct {
 	StartNodeID string     `json:"start_node_id"`
 	Direction   string     `json:"direction"`            // forward, reverse, both
-	Depth       int        `json:"depth,omitempty"`       // max depth (default: 2)
-	EdgeTypes   []EdgeType `json:"edge_types,omitempty"`  // filter by edge type
-	Limit       int        `json:"limit,omitempty"`       // max nodes returned
+	Depth       int        `json:"depth,omitempty"`      // max depth (default: 2)
+	EdgeTypes   []EdgeType `json:"edge_types,omitempty"` // filter by edge type
+	Limit       int        `json:"limit,omitempty"`      // max nodes returned
 }
 
 // ExploreResult contains the explored subgraph.

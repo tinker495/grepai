@@ -6,12 +6,12 @@ func TestLocalExtractor_ExtractFeature(t *testing.T) {
 	ext := NewLocalExtractor()
 
 	tests := []struct {
-		name         string
-		symbolName   string
-		signature    string
-		receiver     string
-		comment      string
-		expected     string
+		name       string
+		symbolName string
+		signature  string
+		receiver   string
+		comment    string
+		expected   string
 	}{
 		{
 			name:       "simple verb-object",

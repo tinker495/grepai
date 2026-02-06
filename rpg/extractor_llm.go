@@ -13,7 +13,7 @@ import (
 
 // LLMExtractorConfig configures the LLM feature extractor.
 type LLMExtractorConfig struct {
-	Provider string        // "openai" compatible
+	Provider string // "openai" compatible
 	Model    string
 	Endpoint string
 	APIKey   string

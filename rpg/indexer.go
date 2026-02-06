@@ -121,19 +121,27 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 			callerID := findSymbolNodeID(graph, ce.Caller, ce.File, ce.Line)
 			// For callee, look up in all files
 			calleeNodes := graph.GetNodesByKind(KindSymbol)
+			var bestMatch *Node
 			for _, cn := range calleeNodes {
 				if cn.SymbolName == ce.Callee {
-					if callerID != "" {
-						graph.AddEdge(&Edge{
-							From:      callerID,
-							To:        cn.ID,
-							Type:      EdgeInvokes,
-							Weight:    1.0,
-							UpdatedAt: time.Now(),
-						})
+					if bestMatch == nil {
+						bestMatch = cn
 					}
-					break
+					// Prefer same-file match
+					if cn.Path == ce.File {
+						bestMatch = cn
+						break
+					}
 				}
+			}
+			if bestMatch != nil && callerID != "" {
+				graph.AddEdge(&Edge{
+					From:      callerID,
+					To:        bestMatch.ID,
+					Type:      EdgeInvokes,
+					Weight:    1.0,
+					UpdatedAt: time.Now(),
+				})
 			}
 		}
 	}

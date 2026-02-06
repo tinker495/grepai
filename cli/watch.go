@@ -374,7 +374,7 @@ func runWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.
 			}
 
 		case event := <-w.Events():
-			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, rpgIndexer, tracedLanguages, projectRoot, cfg, &lastConfigWrite, event)
+			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, rpgIndexer, st, tracedLanguages, projectRoot, cfg, &lastConfigWrite, event)
 		}
 	}
 }
@@ -559,13 +559,18 @@ func runWatchForeground() error {
 		var featureExtractor rpg.FeatureExtractor
 		switch cfg.RPG.FeatureMode {
 		case "llm", "hybrid":
-			featureExtractor = rpg.NewLLMExtractor(rpg.LLMExtractorConfig{
-				Provider: cfg.RPG.LLMProvider,
-				Model:    cfg.RPG.LLMModel,
-				Endpoint: cfg.RPG.LLMEndpoint,
-				APIKey:   cfg.RPG.LLMAPIKey,
-				Timeout:  time.Duration(cfg.RPG.LLMTimeoutMs) * time.Millisecond,
-			})
+			if cfg.RPG.LLMEndpoint == "" || cfg.RPG.LLMModel == "" {
+				log.Printf("Warning: RPG feature_mode=%q but llm_endpoint or llm_model is empty, falling back to local extractor", cfg.RPG.FeatureMode)
+				featureExtractor = rpg.NewLocalExtractor()
+			} else {
+				featureExtractor = rpg.NewLLMExtractor(rpg.LLMExtractorConfig{
+					Provider: cfg.RPG.LLMProvider,
+					Model:    cfg.RPG.LLMModel,
+					Endpoint: cfg.RPG.LLMEndpoint,
+					APIKey:   cfg.RPG.LLMAPIKey,
+					Timeout:  time.Duration(cfg.RPG.LLMTimeoutMs) * time.Millisecond,
+				})
+			}
 		default: // "local" or empty
 			featureExtractor = rpg.NewLocalExtractor()
 		}
@@ -657,7 +662,7 @@ func runWatchForeground() error {
 	return runWatchLoop(ctx, st, symbolStore, w, idx, scanner, extractor, tracedLanguages, projectRoot, cfg, rpgIndexer, rpgStore, isBackgroundChild)
 }
 
-func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, rpgIndexer *rpg.RPGIndexer, enabledLanguages []string, projectRoot string, cfg *config.Config, lastConfigWrite *time.Time, event watcher.FileEvent) {
+func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, rpgIndexer *rpg.RPGIndexer, vectorStore store.VectorStore, enabledLanguages []string, projectRoot string, cfg *config.Config, lastConfigWrite *time.Time, event watcher.FileEvent) {
 	log.Printf("[%s] %s", event.Type, event.Path)
 
 	switch event.Type {
@@ -707,6 +712,14 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 					}
 					if err := rpgIndexer.HandleFileEvent(ctx, eventType, fileInfo.Path, symbols); err != nil {
 						log.Printf("Warning: failed to update RPG for %s: %v", event.Path, err)
+					}
+					// Update EdgeMapsToChunk edges
+					if vectorStore != nil {
+						if chunks, err := vectorStore.GetChunksForFile(ctx, fileInfo.Path); err == nil {
+							if err := rpgIndexer.LinkChunksForFile(ctx, fileInfo.Path, chunks); err != nil {
+								log.Printf("Warning: failed to link RPG chunks for %s: %v", event.Path, err)
+							}
+						}
 					}
 				}
 			}
