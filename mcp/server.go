@@ -131,13 +131,6 @@ func NewServerWithWorkspace(projectRoot, workspaceName string) (*Server, error) 
 	return s, nil
 }
 
-// NewServerWithWorktreeGroup creates a new MCP server that auto-detects and serves
-// a worktree group. It converts the worktree group config to a workspace for reuse.
-// This is a convenience wrapper around NewServerWithWorkspace.
-func NewServerWithWorktreeGroup(projectRoot, workspaceName string) (*Server, error) {
-	return NewServerWithWorkspace(projectRoot, workspaceName)
-}
-
 // registerTools registers all grepai tools with the MCP server.
 func (s *Server) registerTools() {
 	// grepai_search tool
