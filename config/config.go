@@ -15,6 +15,12 @@ const (
 	IndexFileName       = "index.gob"
 	SymbolIndexFileName = "symbols.gob"
 	RPGIndexFileName    = "rpg.gob"
+
+	// RPG default configuration values.
+	DefaultRPGDriftThreshold    = 0.35
+	DefaultRPGMaxTraversalDepth = 3
+	DefaultRPGLLMTimeoutMs      = 8000
+	DefaultRPGFeatureMode       = "local"
 )
 
 type Config struct {
@@ -128,6 +134,23 @@ type RPGConfig struct {
 	LLMTimeoutMs      int     `yaml:"llm_timeout_ms,omitempty"`
 }
 
+// ValidateRPGConfig checks RPG configuration values for validity.
+func ValidateRPGConfig(cfg RPGConfig) error {
+	if cfg.DriftThreshold < 0.0 || cfg.DriftThreshold > 1.0 {
+		return fmt.Errorf("rpg.drift_threshold must be between 0.0 and 1.0, got %.2f", cfg.DriftThreshold)
+	}
+	if cfg.MaxTraversalDepth < 1 || cfg.MaxTraversalDepth > 10 {
+		return fmt.Errorf("rpg.max_traversal_depth must be between 1 and 10, got %d", cfg.MaxTraversalDepth)
+	}
+	switch cfg.FeatureMode {
+	case "local", "hybrid", "llm":
+		// valid
+	default:
+		return fmt.Errorf("rpg.feature_mode must be one of: local, hybrid, llm; got %q", cfg.FeatureMode)
+	}
+	return nil
+}
+
 func DefaultConfig() *Config {
 	defaultDim := 768
 	return &Config{
@@ -207,13 +230,13 @@ func DefaultConfig() *Config {
 		},
 		RPG: RPGConfig{
 			Enabled:           false,
-			FeatureMode:       "local",
-			DriftThreshold:    0.35,
-			MaxTraversalDepth: 3,
+			FeatureMode:       DefaultRPGFeatureMode,
+			DriftThreshold:    DefaultRPGDriftThreshold,
+			MaxTraversalDepth: DefaultRPGMaxTraversalDepth,
 			LLMProvider:       "ollama",
 			LLMModel:          "lfm2.5-thinking",
 			LLMEndpoint:       "http://localhost:11434/v1",
-			LLMTimeoutMs:      8000,
+			LLMTimeoutMs:      DefaultRPGLLMTimeoutMs,
 		},
 		Update: UpdateConfig{
 			CheckOnStartup: false, // Opt-in by default for privacy
@@ -273,6 +296,13 @@ func Load(projectRoot string) (*Config, error) {
 
 	// Apply defaults for missing values (backward compatibility)
 	cfg.applyDefaults()
+
+	// Validate RPG config when enabled
+	if cfg.RPG.Enabled {
+		if err := ValidateRPGConfig(cfg.RPG); err != nil {
+			return nil, fmt.Errorf("invalid RPG configuration: %w", err)
+		}
+	}
 
 	return &cfg, nil
 }
@@ -335,13 +365,13 @@ func (c *Config) applyDefaults() {
 
 	// RPG defaults
 	if c.RPG.FeatureMode == "" {
-		c.RPG.FeatureMode = "local"
+		c.RPG.FeatureMode = DefaultRPGFeatureMode
 	}
 	if c.RPG.DriftThreshold < 0 {
-		c.RPG.DriftThreshold = 0.35
+		c.RPG.DriftThreshold = DefaultRPGDriftThreshold
 	}
 	if c.RPG.MaxTraversalDepth <= 0 {
-		c.RPG.MaxTraversalDepth = 3
+		c.RPG.MaxTraversalDepth = DefaultRPGMaxTraversalDepth
 	}
 	if c.RPG.LLMProvider == "" {
 		c.RPG.LLMProvider = "ollama"
@@ -353,7 +383,7 @@ func (c *Config) applyDefaults() {
 		c.RPG.LLMEndpoint = "http://localhost:11434/v1"
 	}
 	if c.RPG.LLMTimeoutMs <= 0 {
-		c.RPG.LLMTimeoutMs = 8000
+		c.RPG.LLMTimeoutMs = DefaultRPGLLMTimeoutMs
 	}
 }
 
