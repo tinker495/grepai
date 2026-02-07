@@ -91,8 +91,35 @@ func NewGraph() *Graph {
 	}
 }
 
-// AddNode adds a node and updates indexes.
+// AddNode adds or updates a node and maintains indexes.
+// If a node with the same ID already exists, old index entries are removed first
+// to prevent stale reference accumulation.
 func (g *Graph) AddNode(n *Node) {
+	// If node already exists, remove old index entries first
+	if old, exists := g.Nodes[n.ID]; exists {
+		if nodes, ok := g.byKind[old.Kind]; ok {
+			for i, node := range nodes {
+				if node.ID == n.ID {
+					g.byKind[old.Kind] = append(nodes[:i], nodes[i+1:]...)
+					break
+				}
+			}
+		}
+		if old.Path != "" {
+			if nodes, ok := g.byFile[old.Path]; ok {
+				for i, node := range nodes {
+					if node.ID == n.ID {
+						g.byFile[old.Path] = append(nodes[:i], nodes[i+1:]...)
+						break
+					}
+				}
+			}
+		}
+		if old.Kind == KindArea || old.Kind == KindCategory || old.Kind == KindSubcategory {
+			delete(g.byFeaturePath, old.Feature)
+		}
+	}
+
 	g.Nodes[n.ID] = n
 
 	// Update byKind index
