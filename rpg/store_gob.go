@@ -64,8 +64,8 @@ func (s *GOBRPGStore) Load(ctx context.Context) error {
 
 // Persist writes the graph to persistent storage.
 func (s *GOBRPGStore) Persist(ctx context.Context) error {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	file, err := os.Create(s.indexPath)
 	if err != nil {
