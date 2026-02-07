@@ -81,22 +81,45 @@ type rpgEnrichment struct {
 }
 
 // enrichWithRPG enriches search results with RPG feature paths, symbol names, and optional distance.
-func enrichWithRPG(projectRoot string, cfg *config.Config, results []store.SearchResult, distanceFrom string) []rpgEnrichment {
+// When distanceFrom is set, RPG load failures become hard errors instead of best-effort.
+func enrichWithRPG(projectRoot string, cfg *config.Config, results []store.SearchResult, distanceFrom string) ([]rpgEnrichment, error) {
 	enrichments := make([]rpgEnrichment, len(results))
 	if !cfg.RPG.Enabled {
-		return enrichments
+		if distanceFrom != "" {
+			return nil, fmt.Errorf("--distance-from requires RPG to be enabled")
+		}
+		return enrichments, nil
 	}
 
 	ctx := context.Background()
 	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
 	if err := rpgStore.Load(ctx); err != nil {
-		// Silently fail - RPG enrichment is best-effort
-		return enrichments
+		if distanceFrom != "" {
+			return nil, fmt.Errorf("failed to load RPG index for distance computation: %w", err)
+		}
+		return enrichments, nil
 	}
 	defer rpgStore.Close()
 
 	graph := rpgStore.GetGraph()
+	if distanceFrom != "" && graph.Stats().TotalNodes == 0 {
+		return nil, fmt.Errorf("RPG index is empty; cannot compute distances. Run 'grepai watch' first")
+	}
+
 	qe := rpg.NewQueryEngine(graph)
+
+	// When distance is requested, validate source node exists
+	if distanceFrom != "" && graph.GetNode(distanceFrom) == nil {
+		return nil, fmt.Errorf("distance-from node not found in RPG graph: %s", distanceFrom)
+	}
+
+	// Pre-fill distance to -1 when distance is requested
+	if distanceFrom != "" {
+		for i := range enrichments {
+			d := -1.0
+			enrichments[i].Distance = &d
+		}
+	}
 
 	for i, r := range results {
 		nodes := graph.GetNodesByFile(r.Chunk.FilePath)
@@ -126,7 +149,7 @@ func enrichWithRPG(projectRoot string, cfg *config.Config, results []store.Searc
 		}
 	}
 
-	return enrichments
+	return enrichments, nil
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -257,7 +280,10 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	}
 
 	// Enrich results with RPG context
-	enrichments := enrichWithRPG(projectRoot, cfg, results, searchDistanceFrom)
+	enrichments, enrichErr := enrichWithRPG(projectRoot, cfg, results, searchDistanceFrom)
+	if enrichErr != nil {
+		return enrichErr
+	}
 
 	// JSON output mode
 	if searchJSON {

@@ -390,16 +390,36 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	rpgData := make(map[int]rpgInfo)
 	rpgSt, qe, rpgErr := s.tryLoadRPG(ctx)
 	if rpgErr != nil {
+		if distanceFrom != "" {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to load RPG for distance computation: %v", rpgErr)), nil
+		}
 		log.Printf("Warning: RPG enrichment unavailable: %v", rpgErr)
+	}
+	if distanceFrom != "" && rpgSt == nil {
+		return mcp.NewToolResultError("RPG index is not available for distance computation"), nil
 	}
 	if rpgSt != nil && qe != nil {
 		defer rpgSt.Close()
 		graph := rpgSt.GetGraph()
+
+		// Validate source node exists when distance is requested
+		if distanceFrom != "" && graph.GetNode(distanceFrom) == nil {
+			return mcp.NewToolResultError(fmt.Sprintf("distance_from node not found in RPG graph: %s", distanceFrom)), nil
+		}
+
+		// Pre-fill distance to -1 for all results when distance is requested
+		if distanceFrom != "" {
+			for i := range results {
+				d := -1.0
+				rpgData[i] = rpgInfo{distance: &d}
+			}
+		}
+
 		for i, r := range results {
 			nodes := graph.GetNodesByFile(r.Chunk.FilePath)
 			for _, n := range nodes {
 				if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.EndLine && r.Chunk.StartLine <= n.EndLine {
-					info := rpgInfo{}
+					info := rpgData[i]
 					fetchRes, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
 					if err == nil && fetchRes != nil {
 						info.featurePath = fetchRes.FeaturePath
