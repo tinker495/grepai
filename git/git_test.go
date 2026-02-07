@@ -4,8 +4,37 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
+
+func assertSamePath(t *testing.T, label, got, want string) {
+	t.Helper()
+
+	gotClean := filepath.Clean(got)
+	wantClean := filepath.Clean(want)
+
+	gotInfo, gotErr := os.Stat(gotClean)
+	wantInfo, wantErr := os.Stat(wantClean)
+	if gotErr == nil && wantErr == nil {
+		if !os.SameFile(gotInfo, wantInfo) {
+			t.Errorf("%s = %q, want same location as %q", label, got, want)
+		}
+		return
+	}
+
+	if runtime.GOOS == "windows" {
+		if !strings.EqualFold(gotClean, wantClean) {
+			t.Errorf("%s = %q, want %q", label, got, want)
+		}
+		return
+	}
+
+	if gotClean != wantClean {
+		t.Errorf("%s = %q, want %q", label, got, want)
+	}
+}
 
 // setupGitRepo initializes a git repo in the given directory with an empty commit.
 func setupGitRepo(t *testing.T, path string) {
@@ -54,9 +83,7 @@ func TestDetect_MainRepo(t *testing.T) {
 	}
 
 	// GitRoot should be the repo path
-	if info.GitRoot != repoPath {
-		t.Errorf("GitRoot = %q, want %q", info.GitRoot, repoPath)
-	}
+	assertSamePath(t, "GitRoot", info.GitRoot, repoPath)
 
 	// IsWorktree should be false for main repo
 	if info.IsWorktree {
@@ -65,9 +92,7 @@ func TestDetect_MainRepo(t *testing.T) {
 
 	// GitCommonDir should end with /.git
 	expectedGitDir := filepath.Join(repoPath, ".git")
-	if info.GitCommonDir != expectedGitDir {
-		t.Errorf("GitCommonDir = %q, want %q", info.GitCommonDir, expectedGitDir)
-	}
+	assertSamePath(t, "GitCommonDir", info.GitCommonDir, expectedGitDir)
 
 	// WorktreeID should be non-empty and 12 chars
 	if len(info.WorktreeID) != 12 {
@@ -78,9 +103,7 @@ func TestDetect_MainRepo(t *testing.T) {
 	}
 
 	// MainWorktree should be the repo path
-	if info.MainWorktree != repoPath {
-		t.Errorf("MainWorktree = %q, want %q", info.MainWorktree, repoPath)
-	}
+	assertSamePath(t, "MainWorktree", info.MainWorktree, repoPath)
 }
 
 func TestDetect_LinkedWorktree(t *testing.T) {
@@ -111,9 +134,7 @@ func TestDetect_LinkedWorktree(t *testing.T) {
 	}
 
 	// GitRoot should be the worktree path
-	if wtInfo.GitRoot != worktreePath {
-		t.Errorf("worktree GitRoot = %q, want %q", wtInfo.GitRoot, worktreePath)
-	}
+	assertSamePath(t, "worktree GitRoot", wtInfo.GitRoot, worktreePath)
 
 	// IsWorktree should be true
 	if !wtInfo.IsWorktree {
@@ -122,14 +143,10 @@ func TestDetect_LinkedWorktree(t *testing.T) {
 
 	// GitCommonDir should point to main repo's .git
 	expectedGitDir := filepath.Join(mainRepo, ".git")
-	if wtInfo.GitCommonDir != expectedGitDir {
-		t.Errorf("worktree GitCommonDir = %q, want %q", wtInfo.GitCommonDir, expectedGitDir)
-	}
+	assertSamePath(t, "worktree GitCommonDir", wtInfo.GitCommonDir, expectedGitDir)
 
 	// MainWorktree should be the main repo path
-	if wtInfo.MainWorktree != mainRepo {
-		t.Errorf("worktree MainWorktree = %q, want %q", wtInfo.MainWorktree, mainRepo)
-	}
+	assertSamePath(t, "worktree MainWorktree", wtInfo.MainWorktree, mainRepo)
 
 	// CRITICAL: WorktreeID should match between main and worktree (same repo identity)
 	if wtInfo.WorktreeID != mainInfo.WorktreeID {
