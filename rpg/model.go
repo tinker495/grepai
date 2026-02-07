@@ -32,16 +32,16 @@ const (
 
 // Node represents a node in the RPG graph.
 type Node struct {
-	ID         string    `json:"id"`
-	Kind       NodeKind  `json:"kind"`
-	Feature    string    `json:"feature"`               // semantic feature label (verb-object)
-	Path       string    `json:"path,omitempty"`        // file path (for file/symbol/chunk nodes)
-	SymbolName string    `json:"symbol_name,omitempty"` // symbol name (for symbol nodes)
-	Receiver   string    `json:"receiver,omitempty"`    // Go receiver type
-	Language   string    `json:"language,omitempty"`    // programming language
-	StartLine  int       `json:"start_line,omitempty"`
-	EndLine    int       `json:"end_line,omitempty"`
-	Signature  string    `json:"signature,omitempty"` // function signature
+	ID            string    `json:"id"`
+	Kind          NodeKind  `json:"kind"`
+	Feature       string    `json:"feature"`               // semantic feature label (verb-object)
+	Path          string    `json:"path,omitempty"`        // file path (for file/symbol/chunk nodes)
+	SymbolName    string    `json:"symbol_name,omitempty"` // symbol name (for symbol nodes)
+	Receiver      string    `json:"receiver,omitempty"`    // Go receiver type
+	Language      string    `json:"language,omitempty"`    // programming language
+	StartLine     int       `json:"start_line,omitempty"`
+	EndLine       int       `json:"end_line,omitempty"`
+	Signature     string    `json:"signature,omitempty"`      // function signature
 	ChunkID       string    `json:"chunk_id,omitempty"`       // linked vector chunk ID
 	SemanticLabel string    `json:"semantic_label,omitempty"` // enriched label with semantic context
 	UpdatedAt     time.Time `json:"updated_at"`
