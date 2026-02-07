@@ -11,6 +11,14 @@ import (
 	"github.com/yoanbernabeu/grepai/trace"
 )
 
+const (
+	// Similarity thresholds for semantic edge creation.
+	minFeatureSimilarity    = 0.5
+	maxFeatureGroupSize     = 100 // cap verb groups to avoid O(n²) for common verbs
+	minCoCallerCoOccurrence = 2
+	coCallerWeightNorm      = 5.0 // normalization factor for co-caller edge weight
+)
+
 // RPGIndexer orchestrates building and maintaining the RPG graph.
 // It connects the trace symbol store, vector store, and RPG graph.
 type RPGIndexer struct {
@@ -360,8 +368,6 @@ func overlaps(start1, end1, start2, end2 int) bool {
 // files whose feature labels have high Jaccard similarity. To avoid O(n^2),
 // symbols are grouped by their feature verb (first word) and only compared within groups.
 func (idx *RPGIndexer) wireFeatureSimilarity(graph *Graph) {
-	const minSim = 0.5
-
 	symbolNodes := graph.GetNodesByKind(KindSymbol)
 
 	// Group symbols by feature verb for efficiency
@@ -379,7 +385,7 @@ func (idx *RPGIndexer) wireFeatureSimilarity(graph *Graph) {
 	seen := make(map[string]bool) // dedup "idA|idB"
 
 	for _, group := range byVerb {
-		if len(group) < 2 {
+		if len(group) < 2 || len(group) > maxFeatureGroupSize {
 			continue
 		}
 		for i := 0; i < len(group); i++ {
@@ -399,7 +405,7 @@ func (idx *RPGIndexer) wireFeatureSimilarity(graph *Graph) {
 				}
 
 				sim := featureSimilarity(a.Feature, b.Feature)
-				if sim >= minSim {
+				if sim >= minFeatureSimilarity {
 					seen[key] = true
 					graph.AddEdge(&Edge{
 						From:      a.ID,
@@ -417,8 +423,6 @@ func (idx *RPGIndexer) wireFeatureSimilarity(graph *Graph) {
 // wireCoCallerAffinity creates EdgeSemanticSim edges between symbols that are
 // frequently called by the same callers (co-callees pattern).
 func (idx *RPGIndexer) wireCoCallerAffinity(graph *Graph) {
-	const minCoOccurrence = 2
-
 	// Build caller -> callees map from EdgeInvokes
 	callerToCallees := make(map[string][]string)
 	for _, e := range graph.Edges {
@@ -446,7 +450,7 @@ func (idx *RPGIndexer) wireCoCallerAffinity(graph *Graph) {
 
 	// Create edges for pairs with enough co-occurrences
 	for key, count := range cooccurrence {
-		if count < minCoOccurrence {
+		if count < minCoCallerCoOccurrence {
 			continue
 		}
 		parts := strings.SplitN(key, "|", 2)
@@ -464,7 +468,7 @@ func (idx *RPGIndexer) wireCoCallerAffinity(graph *Graph) {
 		}
 
 		// Weight: normalize count (cap at 1.0)
-		weight := float64(count) / 5.0
+		weight := float64(count) / coCallerWeightNorm
 		if weight > 1.0 {
 			weight = 1.0
 		}
