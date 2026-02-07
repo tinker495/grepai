@@ -575,8 +575,9 @@ func runWatchForeground() error {
 			featureExtractor = rpg.NewLocalExtractor()
 		}
 		rpgIndexer = rpg.NewRPGIndexer(rpgStore, featureExtractor, projectRoot, rpg.RPGIndexerConfig{
-			DriftThreshold:    cfg.RPG.DriftThreshold,
-			MaxTraversalDepth: cfg.RPG.MaxTraversalDepth,
+			DriftThreshold:       cfg.RPG.DriftThreshold,
+			MaxTraversalDepth:    cfg.RPG.MaxTraversalDepth,
+			FeatureGroupStrategy: cfg.RPG.FeatureGroupStrategy,
 		})
 
 		if !isBackgroundChild {

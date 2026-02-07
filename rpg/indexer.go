@@ -3,6 +3,7 @@ package rpg
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"strings"
 	"time"
@@ -32,8 +33,9 @@ type RPGIndexer struct {
 
 // RPGIndexerConfig configures the RPG indexer behavior.
 type RPGIndexerConfig struct {
-	DriftThreshold    float64
-	MaxTraversalDepth int
+	DriftThreshold       float64
+	MaxTraversalDepth    int
+	FeatureGroupStrategy string
 }
 
 // NewRPGIndexer creates a new RPG indexer instance.
@@ -364,6 +366,38 @@ func overlaps(start1, end1, start2, end2 int) bool {
 	return start1 <= end2 && start2 <= end1
 }
 
+// capGroup splits or samples a verb group that exceeds maxFeatureGroupSize.
+// Strategy "split" partitions by directory, preserving locality; "sample" (default)
+// randomly samples down to cap size.
+func capGroup(group []*Node, strategy string) [][]*Node {
+	if len(group) <= maxFeatureGroupSize {
+		return [][]*Node{group}
+	}
+	switch strategy {
+	case "split":
+		byDir := map[string][]*Node{}
+		for _, n := range group {
+			dir := filepath.Dir(n.Path)
+			byDir[dir] = append(byDir[dir], n)
+		}
+		var result [][]*Node
+		for _, sub := range byDir {
+			if len(sub) < 2 {
+				continue
+			}
+			if len(sub) > maxFeatureGroupSize {
+				rand.Shuffle(len(sub), func(i, j int) { sub[i], sub[j] = sub[j], sub[i] })
+				sub = sub[:maxFeatureGroupSize]
+			}
+			result = append(result, sub)
+		}
+		return result
+	default: // "sample"
+		rand.Shuffle(len(group), func(i, j int) { group[i], group[j] = group[j], group[i] })
+		return [][]*Node{group[:maxFeatureGroupSize]}
+	}
+}
+
 // wireFeatureSimilarity creates EdgeSemanticSim edges between symbols in different
 // files whose feature labels have high Jaccard similarity. To avoid O(n^2),
 // symbols are grouped by their feature verb (first word) and only compared within groups.
@@ -385,35 +419,38 @@ func (idx *RPGIndexer) wireFeatureSimilarity(graph *Graph) {
 	seen := make(map[string]bool) // dedup "idA|idB"
 
 	for _, group := range byVerb {
-		if len(group) < 2 || len(group) > maxFeatureGroupSize {
+		if len(group) < 2 {
 			continue
 		}
-		for i := 0; i < len(group); i++ {
-			for j := i + 1; j < len(group); j++ {
-				a, b := group[i], group[j]
-				if a.Path == b.Path {
-					continue // skip same-file pairs
-				}
+		subgroups := capGroup(group, idx.cfg.FeatureGroupStrategy)
+		for _, sg := range subgroups {
+			for i := range len(sg) {
+				for j := i + 1; j < len(sg); j++ {
+					a, b := sg[i], sg[j]
+					if a.Path == b.Path {
+						continue // skip same-file pairs
+					}
 
-				// Canonical key for dedup
-				key := a.ID + "|" + b.ID
-				if a.ID > b.ID {
-					key = b.ID + "|" + a.ID
-				}
-				if seen[key] {
-					continue
-				}
+					// Canonical key for dedup
+					key := a.ID + "|" + b.ID
+					if a.ID > b.ID {
+						key = b.ID + "|" + a.ID
+					}
+					if seen[key] {
+						continue
+					}
 
-				sim := featureSimilarity(a.Feature, b.Feature)
-				if sim >= minFeatureSimilarity {
-					seen[key] = true
-					graph.AddEdge(&Edge{
-						From:      a.ID,
-						To:        b.ID,
-						Type:      EdgeSemanticSim,
-						Weight:    sim,
-						UpdatedAt: time.Now(),
-					})
+					sim := featureSimilarity(a.Feature, b.Feature)
+					if sim >= minFeatureSimilarity {
+						seen[key] = true
+						graph.AddEdge(&Edge{
+							From:      a.ID,
+							To:        b.ID,
+							Type:      EdgeSemanticSim,
+							Weight:    sim,
+							UpdatedAt: time.Now(),
+						})
+					}
 				}
 			}
 		}

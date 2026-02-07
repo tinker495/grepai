@@ -17,10 +17,11 @@ const (
 	RPGIndexFileName    = "rpg.gob"
 
 	// RPG default configuration values.
-	DefaultRPGDriftThreshold    = 0.35
-	DefaultRPGMaxTraversalDepth = 3
-	DefaultRPGLLMTimeoutMs      = 8000
-	DefaultRPGFeatureMode       = "local"
+	DefaultRPGDriftThreshold       = 0.35
+	DefaultRPGMaxTraversalDepth    = 3
+	DefaultRPGLLMTimeoutMs         = 8000
+	DefaultRPGFeatureMode          = "local"
+	DefaultRPGFeatureGroupStrategy = "sample"
 )
 
 type Config struct {
@@ -127,11 +128,12 @@ type RPGConfig struct {
 	FeatureMode       string  `yaml:"feature_mode"` // local | hybrid | llm
 	DriftThreshold    float64 `yaml:"drift_threshold"`
 	MaxTraversalDepth int     `yaml:"max_traversal_depth"`
-	LLMProvider       string  `yaml:"llm_provider,omitempty"`
-	LLMModel          string  `yaml:"llm_model,omitempty"`
-	LLMEndpoint       string  `yaml:"llm_endpoint,omitempty"`
-	LLMAPIKey         string  `yaml:"llm_api_key,omitempty"`
-	LLMTimeoutMs      int     `yaml:"llm_timeout_ms,omitempty"`
+	LLMProvider          string  `yaml:"llm_provider,omitempty"`
+	LLMModel             string  `yaml:"llm_model,omitempty"`
+	LLMEndpoint          string  `yaml:"llm_endpoint,omitempty"`
+	LLMAPIKey            string  `yaml:"llm_api_key,omitempty"`
+	LLMTimeoutMs         int     `yaml:"llm_timeout_ms,omitempty"`
+	FeatureGroupStrategy string  `yaml:"feature_group_strategy,omitempty"`
 }
 
 // ValidateRPGConfig checks RPG configuration values for validity.
@@ -147,6 +149,12 @@ func ValidateRPGConfig(cfg RPGConfig) error {
 		// valid
 	default:
 		return fmt.Errorf("rpg.feature_mode must be one of: local, hybrid, llm; got %q", cfg.FeatureMode)
+	}
+	switch cfg.FeatureGroupStrategy {
+	case "sample", "split":
+		// valid
+	default:
+		return fmt.Errorf("rpg.feature_group_strategy must be one of: sample, split; got %q", cfg.FeatureGroupStrategy)
 	}
 	return nil
 }
@@ -229,14 +237,15 @@ func DefaultConfig() *Config {
 			},
 		},
 		RPG: RPGConfig{
-			Enabled:           false,
-			FeatureMode:       DefaultRPGFeatureMode,
-			DriftThreshold:    DefaultRPGDriftThreshold,
-			MaxTraversalDepth: DefaultRPGMaxTraversalDepth,
-			LLMProvider:       "ollama",
-			LLMModel:          "lfm2.5-thinking",
-			LLMEndpoint:       "http://localhost:11434/v1",
-			LLMTimeoutMs:      DefaultRPGLLMTimeoutMs,
+			Enabled:              false,
+			FeatureMode:          DefaultRPGFeatureMode,
+			DriftThreshold:       DefaultRPGDriftThreshold,
+			MaxTraversalDepth:    DefaultRPGMaxTraversalDepth,
+			LLMProvider:          "ollama",
+			LLMModel:             "lfm2.5-thinking",
+			LLMEndpoint:          "http://localhost:11434/v1",
+			LLMTimeoutMs:         DefaultRPGLLMTimeoutMs,
+			FeatureGroupStrategy: DefaultRPGFeatureGroupStrategy,
 		},
 		Update: UpdateConfig{
 			CheckOnStartup: false, // Opt-in by default for privacy
@@ -384,6 +393,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.RPG.LLMTimeoutMs <= 0 {
 		c.RPG.LLMTimeoutMs = DefaultRPGLLMTimeoutMs
+	}
+	if c.RPG.FeatureGroupStrategy == "" {
+		c.RPG.FeatureGroupStrategy = DefaultRPGFeatureGroupStrategy
 	}
 }
 
