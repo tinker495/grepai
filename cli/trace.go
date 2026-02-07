@@ -72,6 +72,24 @@ Examples:
 	RunE: runTraceGraph,
 }
 
+var tracePathEdgeTypes string
+
+var tracePathCmd = &cobra.Command{
+	Use:   "path <source_id> <target_id>",
+	Short: "Find shortest path between two RPG nodes",
+	Long: `Find the shortest path between two RPG nodes using Dijkstra's algorithm.
+Node IDs follow the RPG naming convention:
+  sym:<path>:<name>    - symbol nodes
+  file:<path>          - file nodes
+  area:<name>          - area nodes
+
+Examples:
+  grepai trace path "sym:search/search.go:Search" "sym:embedder/embedder.go:Embed" --json
+  grepai trace path "file:cli/watch.go" "file:rpg/model.go" --edge-types invokes,imports`,
+	Args: cobra.ExactArgs(2),
+	RunE: runTracePath,
+}
+
 func init() {
 	// Add flags to all trace subcommands
 	for _, cmd := range []*cobra.Command{traceCallersCmd, traceCalleesCmd, traceGraphCmd} {
@@ -82,9 +100,16 @@ func init() {
 	}
 	traceGraphCmd.Flags().IntVarP(&traceDepth, "depth", "d", 2, "Maximum depth for graph traversal")
 
+	// trace path flags
+	tracePathCmd.Flags().BoolVar(&traceJSON, "json", false, "Output results in JSON format")
+	tracePathCmd.Flags().BoolVarP(&traceTOON, "toon", "t", false, "Output results in TOON format (token-efficient for AI agents)")
+	tracePathCmd.MarkFlagsMutuallyExclusive("json", "toon")
+	tracePathCmd.Flags().StringVar(&tracePathEdgeTypes, "edge-types", "", "Comma-separated edge types to follow: feature_parent,contains,invokes,imports,maps_to_chunk,semantic_sim")
+
 	traceCmd.AddCommand(traceCallersCmd)
 	traceCmd.AddCommand(traceCalleesCmd)
 	traceCmd.AddCommand(traceGraphCmd)
+	traceCmd.AddCommand(tracePathCmd)
 
 	rootCmd.AddCommand(traceCmd)
 }
@@ -307,6 +332,125 @@ func runTraceGraph(cmd *cobra.Command, args []string) error {
 	}
 
 	return displayGraphResult(result)
+}
+
+func runTracePath(cmd *cobra.Command, args []string) error {
+	sourceID := args[0]
+	targetID := args[1]
+	ctx := context.Background()
+
+	projectRoot, err := config.FindProjectRoot()
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	if !cfg.RPG.Enabled {
+		return fmt.Errorf("RPG is not enabled. Enable it in .grepai/config.yaml (rpg.enabled: true) and run 'grepai watch'")
+	}
+
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		return fmt.Errorf("failed to load RPG index: %w. Run 'grepai watch' first", err)
+	}
+	defer rpgStore.Close()
+
+	graph := rpgStore.GetGraph()
+	if graph.Stats().TotalNodes == 0 {
+		return fmt.Errorf("RPG index is empty. Run 'grepai watch' first to build the index")
+	}
+
+	// Parse edge types
+	var edgeTypes []rpg.EdgeType
+	if tracePathEdgeTypes != "" {
+		for _, et := range strings.Split(tracePathEdgeTypes, ",") {
+			et = strings.TrimSpace(et)
+			switch et {
+			case "feature_parent":
+				edgeTypes = append(edgeTypes, rpg.EdgeFeatureParent)
+			case "contains":
+				edgeTypes = append(edgeTypes, rpg.EdgeContains)
+			case "invokes":
+				edgeTypes = append(edgeTypes, rpg.EdgeInvokes)
+			case "imports":
+				edgeTypes = append(edgeTypes, rpg.EdgeImports)
+			case "maps_to_chunk":
+				edgeTypes = append(edgeTypes, rpg.EdgeMapsToChunk)
+			case "semantic_sim":
+				edgeTypes = append(edgeTypes, rpg.EdgeSemanticSim)
+			default:
+				return fmt.Errorf("invalid edge type: %s", et)
+			}
+		}
+	}
+
+	qe := rpg.NewQueryEngine(graph)
+	result, err := qe.ShortestPath(ctx, rpg.ShortestPathRequest{
+		SourceID:  sourceID,
+		TargetID:  targetID,
+		EdgeTypes: edgeTypes,
+	})
+	if err != nil {
+		return fmt.Errorf("shortest path computation failed: %w", err)
+	}
+
+	if traceJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	if traceTOON {
+		output, err := gotoon.Encode(result)
+		if err != nil {
+			return fmt.Errorf("failed to encode TOON: %w", err)
+		}
+		fmt.Println(output)
+		return nil
+	}
+
+	return displayPathResult(result)
+}
+
+func displayPathResult(result *rpg.ShortestPathResult) error {
+	if result.Distance < 0 {
+		src := "<unknown>"
+		tgt := "<unknown>"
+		if result.Source != nil {
+			src = result.Source.ID
+		}
+		if result.Target != nil {
+			tgt = result.Target.ID
+		}
+		fmt.Printf("No path found from %s to %s\n", src, tgt)
+		return nil
+	}
+
+	fmt.Printf("Shortest Path: %s -> %s\n", result.Source.ID, result.Target.ID)
+	fmt.Printf("Total Distance: %.4f (%d hops)\n", result.Distance, len(result.Edges))
+	fmt.Println(strings.Repeat("-", 60))
+
+	for i, step := range result.Steps {
+		nodeLabel := step.Node.ID
+		if step.Node.SymbolName != "" {
+			nodeLabel = fmt.Sprintf("%s (%s)", step.Node.ID, step.Node.SymbolName)
+		}
+
+		if i == 0 {
+			fmt.Printf("  %s (cost: %.4f)\n", nodeLabel, step.Cost)
+		} else {
+			edgeType := ""
+			if step.Edge != nil {
+				edgeType = string(step.Edge.Type)
+			}
+			fmt.Printf("  -> %s (cost: %.4f, via: %s)\n", nodeLabel, step.Cost, edgeType)
+		}
+	}
+
+	return nil
 }
 
 // enrichTraceWithRPG enriches all symbols in a TraceResult with RPG feature paths.

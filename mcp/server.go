@@ -29,23 +29,25 @@ type Server struct {
 
 // SearchResult is a lightweight struct for MCP output.
 type SearchResult struct {
-	FilePath    string  `json:"file_path"`
-	StartLine   int     `json:"start_line"`
-	EndLine     int     `json:"end_line"`
-	Score       float32 `json:"score"`
-	Content     string  `json:"content"`
-	FeaturePath string  `json:"feature_path,omitempty"`
-	SymbolName  string  `json:"symbol_name,omitempty"`
+	FilePath    string   `json:"file_path"`
+	StartLine   int      `json:"start_line"`
+	EndLine     int      `json:"end_line"`
+	Score       float32  `json:"score"`
+	Content     string   `json:"content"`
+	FeaturePath string   `json:"feature_path,omitempty"`
+	SymbolName  string   `json:"symbol_name,omitempty"`
+	Distance    *float64 `json:"distance,omitempty"`
 }
 
 // SearchResultCompact is a minimal struct for compact output (no content field).
 type SearchResultCompact struct {
-	FilePath    string  `json:"file_path"`
-	StartLine   int     `json:"start_line"`
-	EndLine     int     `json:"end_line"`
-	Score       float32 `json:"score"`
-	FeaturePath string  `json:"feature_path,omitempty"`
-	SymbolName  string  `json:"symbol_name,omitempty"`
+	FilePath    string   `json:"file_path"`
+	StartLine   int      `json:"start_line"`
+	EndLine     int      `json:"end_line"`
+	Score       float32  `json:"score"`
+	FeaturePath string   `json:"feature_path,omitempty"`
+	SymbolName  string   `json:"symbol_name,omitempty"`
+	Distance    *float64 `json:"distance,omitempty"`
 }
 
 // CallSiteCompact is a minimal struct for compact output (no context field).
@@ -163,6 +165,9 @@ func (s *Server) registerTools() {
 		),
 		mcp.WithString("projects",
 			mcp.Description("Comma-separated list of project names to search within workspace (requires workspace)"),
+		),
+		mcp.WithString("distance_from",
+			mcp.Description("RPG node ID to compute distance from each result (requires RPG enabled)"),
 		),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
@@ -284,6 +289,26 @@ func (s *Server) registerTools() {
 		),
 	)
 	s.mcpServer.AddTool(rpgExploreTool, s.handleRPGExplore)
+
+	// grepai_trace_path tool
+	tracePathTool := mcp.NewTool("grepai_trace_path",
+		mcp.WithDescription("Find shortest path between two RPG nodes using Dijkstra's algorithm. Returns the path, edges, and total distance."),
+		mcp.WithString("source_id",
+			mcp.Required(),
+			mcp.Description("Source RPG node ID (e.g., 'sym:search/search.go:Search', 'file:cli/watch.go')"),
+		),
+		mcp.WithString("target_id",
+			mcp.Required(),
+			mcp.Description("Target RPG node ID"),
+		),
+		mcp.WithString("edge_types",
+			mcp.Description("Comma-separated edge types to follow: feature_parent, contains, invokes, imports, maps_to_chunk, semantic_sim"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(tracePathTool, s.handleTracePath)
 }
 
 // handleSearch handles the grepai_search tool call.
@@ -302,10 +327,16 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	format := request.GetString("format", "json")
 	workspace := request.GetString("workspace", "")
 	projects := request.GetString("projects", "")
+	distanceFrom := request.GetString("distance_from", "")
 
 	// Auto-inject workspace when server is in workspace mode
 	if workspace == "" && s.workspaceName != "" {
 		workspace = s.workspaceName
+	}
+
+	// Validate distance_from with workspace
+	if distanceFrom != "" && workspace != "" {
+		return mcp.NewToolResultError("distance_from is not supported with workspace search (RPG is per-project)"), nil
 	}
 
 	// Validate format
@@ -322,6 +353,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	cfg, err := config.Load(s.projectRoot)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to load configuration: %v", err)), nil
+	}
+
+	// Validate distance_from requires RPG
+	if distanceFrom != "" && !cfg.RPG.Enabled {
+		return mcp.NewToolResultError("distance_from requires RPG to be enabled (set rpg.enabled: true in config)"), nil
 	}
 
 	// Initialize embedder
@@ -349,6 +385,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	type rpgInfo struct {
 		featurePath string
 		symbolName  string
+		distance    *float64
 	}
 	rpgData := make(map[int]rpgInfo)
 	rpgSt, qe, rpgErr := s.tryLoadRPG(ctx)
@@ -362,10 +399,23 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 			nodes := graph.GetNodesByFile(r.Chunk.FilePath)
 			for _, n := range nodes {
 				if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.EndLine && r.Chunk.StartLine <= n.EndLine {
+					info := rpgInfo{}
 					fetchRes, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
 					if err == nil && fetchRes != nil {
-						rpgData[i] = rpgInfo{featurePath: fetchRes.FeaturePath, symbolName: n.SymbolName}
+						info.featurePath = fetchRes.FeaturePath
+						info.symbolName = n.SymbolName
 					}
+					if distanceFrom != "" {
+						pathRes, pathErr := qe.ShortestPath(ctx, rpg.ShortestPathRequest{
+							SourceID: distanceFrom,
+							TargetID: n.ID,
+						})
+						if pathErr == nil && pathRes != nil {
+							d := pathRes.Distance
+							info.distance = &d
+						}
+					}
+					rpgData[i] = info
 					break
 				}
 			}
@@ -385,6 +435,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 			if info, ok := rpgData[i]; ok {
 				searchResultsCompact[i].FeaturePath = info.featurePath
 				searchResultsCompact[i].SymbolName = info.symbolName
+				searchResultsCompact[i].Distance = info.distance
 			}
 		}
 		data = searchResultsCompact
@@ -401,6 +452,7 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 			if info, ok := rpgData[i]; ok {
 				searchResults[i].FeaturePath = info.featurePath
 				searchResults[i].SymbolName = info.symbolName
+				searchResults[i].Distance = info.distance
 			}
 		}
 		data = searchResults
@@ -1320,4 +1372,75 @@ func (s *Server) handleRPGExplore(ctx context.Context, request mcp.CallToolReque
 	}
 
 	return mcp.NewToolResultText(output), nil
+}
+
+// handleTracePath handles the grepai_trace_path tool call.
+func (s *Server) handleTracePath(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	sourceID, err := request.RequireString("source_id")
+	if err != nil {
+		return mcp.NewToolResultError("source_id parameter is required"), nil
+	}
+
+	targetID, err := request.RequireString("target_id")
+	if err != nil {
+		return mcp.NewToolResultError("target_id parameter is required"), nil
+	}
+
+	edgeTypesStr := request.GetString("edge_types", "")
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Parse edge types
+	var edgeTypes []rpg.EdgeType
+	if edgeTypesStr != "" {
+		edgeParts := strings.Split(edgeTypesStr, ",")
+		for _, et := range edgeParts {
+			et = strings.TrimSpace(et)
+			switch et {
+			case "feature_parent":
+				edgeTypes = append(edgeTypes, rpg.EdgeFeatureParent)
+			case "contains":
+				edgeTypes = append(edgeTypes, rpg.EdgeContains)
+			case "invokes":
+				edgeTypes = append(edgeTypes, rpg.EdgeInvokes)
+			case "imports":
+				edgeTypes = append(edgeTypes, rpg.EdgeImports)
+			case "maps_to_chunk":
+				edgeTypes = append(edgeTypes, rpg.EdgeMapsToChunk)
+			case "semantic_sim":
+				edgeTypes = append(edgeTypes, rpg.EdgeSemanticSim)
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("invalid edge type: %s", et)), nil
+			}
+		}
+	}
+
+	// Execute shortest path
+	pathResult, err := qe.ShortestPath(ctx, rpg.ShortestPathRequest{
+		SourceID:  sourceID,
+		TargetID:  targetID,
+		EdgeTypes: edgeTypes,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("shortest path failed: %v", err)), nil
+	}
+
+	// Encode output
+	pathOutput, err := encodeOutput(pathResult, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(pathOutput), nil
 }

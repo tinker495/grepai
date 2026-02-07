@@ -123,11 +123,11 @@ type TraceConfig struct {
 }
 
 type RPGConfig struct {
-	Enabled           bool    `yaml:"enabled"`
-	StorePath         string  `yaml:"store_path,omitempty"`
-	FeatureMode       string  `yaml:"feature_mode"` // local | hybrid | llm
-	DriftThreshold    float64 `yaml:"drift_threshold"`
-	MaxTraversalDepth int     `yaml:"max_traversal_depth"`
+	Enabled              bool    `yaml:"enabled"`
+	StorePath            string  `yaml:"store_path,omitempty"`
+	FeatureMode          string  `yaml:"feature_mode"` // local | hybrid | llm
+	DriftThreshold       float64 `yaml:"drift_threshold"`
+	MaxTraversalDepth    int     `yaml:"max_traversal_depth"`
 	LLMProvider          string  `yaml:"llm_provider,omitempty"`
 	LLMModel             string  `yaml:"llm_model,omitempty"`
 	LLMEndpoint          string  `yaml:"llm_endpoint,omitempty"`

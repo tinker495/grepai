@@ -367,10 +367,10 @@ func TestBuildFull_EdgeImports(t *testing.T) {
 		toFileID := MakeNodeID(KindFile, calleeNode.Path)
 		if g.GetNode(fromFileID) != nil && g.GetNode(toFileID) != nil {
 			g.AddEdge(&Edge{
-				From:      fromFileID,
-				To:        toFileID,
-				Type:      EdgeImports,
-				Weight:    1.0,
+				From:   fromFileID,
+				To:     toFileID,
+				Type:   EdgeImports,
+				Weight: 1.0,
 			})
 		}
 	}

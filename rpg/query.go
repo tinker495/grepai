@@ -53,7 +53,30 @@ type ExploreResult struct {
 	Depth     int              `json:"depth"`
 }
 
-// QueryEngine provides the 3 RPG query operations.
+// ShortestPathRequest is the input for ShortestPath.
+type ShortestPathRequest struct {
+	SourceID  string     `json:"source_id"`
+	TargetID  string     `json:"target_id"`
+	EdgeTypes []EdgeType `json:"edge_types,omitempty"`
+}
+
+// PathStep represents one node along a shortest path with cumulative cost.
+type PathStep struct {
+	Node *Node   `json:"node"`
+	Edge *Edge   `json:"edge,omitempty"` // edge used to reach this node (nil for source)
+	Cost float64 `json:"cost"`           // cumulative cost up to this node
+}
+
+// ShortestPathResult contains the shortest path between two nodes.
+type ShortestPathResult struct {
+	Source   *Node      `json:"source"`
+	Target   *Node      `json:"target"`
+	Distance float64    `json:"distance"` // total distance (-1 = unreachable)
+	Steps    []PathStep `json:"steps"`
+	Edges    []*Edge    `json:"edges"`
+}
+
+// QueryEngine provides the RPG query operations.
 type QueryEngine struct {
 	graph *Graph
 }
@@ -297,6 +320,55 @@ func (qe *QueryEngine) Explore(_ context.Context, req ExploreRequest) (*ExploreR
 
 			queue = append(queue, bfsEntry{nodeID: neighborID, depth: nextDepth})
 		}
+	}
+
+	return result, nil
+}
+
+// ShortestPath computes the shortest path between two nodes using Dijkstra's algorithm.
+func (qe *QueryEngine) ShortestPath(_ context.Context, req ShortestPathRequest) (*ShortestPathResult, error) {
+	sourceNode := qe.graph.GetNode(req.SourceID)
+	if sourceNode == nil {
+		return &ShortestPathResult{Distance: -1}, nil
+	}
+	targetNode := qe.graph.GetNode(req.TargetID)
+	if targetNode == nil {
+		return &ShortestPathResult{Source: sourceNode, Distance: -1}, nil
+	}
+
+	// Build edge type filter set
+	edgeTypeSet := make(map[EdgeType]bool, len(req.EdgeTypes))
+	for _, et := range req.EdgeTypes {
+		edgeTypeSet[et] = true
+	}
+
+	nodeIDs, edges, totalCost := qe.graph.ShortestPath(req.SourceID, req.TargetID, edgeTypeSet)
+
+	result := &ShortestPathResult{
+		Source:   sourceNode,
+		Target:   targetNode,
+		Distance: totalCost,
+		Edges:    edges,
+	}
+
+	if nodeIDs == nil {
+		result.Distance = -1
+		return result, nil
+	}
+
+	// Build steps with cumulative cost
+	var cumCost float64
+	for i, id := range nodeIDs {
+		step := PathStep{
+			Node: qe.graph.GetNode(id),
+		}
+		if i > 0 && i-1 < len(edges) {
+			edge := edges[i-1]
+			cumCost += edgeCost(edge.Weight)
+			step.Edge = edge
+		}
+		step.Cost = cumCost
+		result.Steps = append(result.Steps, step)
 	}
 
 	return result, nil
