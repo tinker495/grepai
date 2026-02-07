@@ -7,8 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-02-07
+
 ### Added
 
+- **Ollama/LM Studio Endpoint Prompt**: `grepai init` now prompts for custom Ollama/LM Studio endpoint URL during initialization (#111) - @yoanbernabeu
+- **Content-Addressed Embedding Deduplication**: Skip re-embedding unchanged chunks using content hashing, reducing indexing time and API calls (#112) - @tinker495
+- **Nix Release Automation**: Automate `flake.nix` version and vendorHash update in the release GitHub Actions workflow (#117) - @yoanbernabeu
 - **RPG (Repository Program Graph)**: Semantic graph layer for structural code understanding
   - Builds a hierarchical graph of areas, categories, files, symbols, and chunks
   - Feature extraction: local heuristic (verb-object from names) or optional LLM-based
@@ -18,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - New config section `rpg:` with `enabled`, `feature_mode`, `drift_threshold`, `max_traversal_depth`
   - RPG context enhances existing `grepai_search` results when enabled
   - Gated by `rpg.enabled: true` in config (default: false)
+
+### Fixed
+
+- **UTF-8 Chunk Boundaries**: Align chunk boundaries to valid UTF-8 rune starts to prevent splitting multi-byte characters (#116) - @yoanbernabeu
 
 ## [0.27.0] - 2026-02-04
 
@@ -508,7 +517,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial public release
 
-[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/yoanbernabeu/grepai/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/yoanbernabeu/grepai/compare/v0.26.0...v0.27.0
 [0.26.0]: https://github.com/yoanbernabeu/grepai/compare/v0.25.2...v0.26.0
 [0.25.2]: https://github.com/yoanbernabeu/grepai/compare/v0.25.1...v0.25.2
