@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 
 	"github.com/alpkeskin/gotoon"
@@ -350,8 +351,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		symbolName  string
 	}
 	rpgData := make(map[int]rpgInfo)
-	rpgSt, qe, _ := s.tryLoadRPG(ctx)
-	if rpgSt != nil {
+	rpgSt, qe, rpgErr := s.tryLoadRPG(ctx)
+	if rpgErr != nil {
+		log.Printf("Warning: RPG enrichment unavailable: %v", rpgErr)
+	}
+	if rpgSt != nil && qe != nil {
 		defer rpgSt.Close()
 		graph := rpgSt.GetGraph()
 		for i, r := range results {
@@ -578,6 +582,7 @@ func (s *Server) enrichTraceSymbols(ctx context.Context, symbols ...*trace.Symbo
 	}
 	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(s.projectRoot))
 	if err := rpgStore.Load(ctx); err != nil {
+		log.Printf("Warning: RPG enrichment unavailable for trace: %v", err)
 		return
 	}
 	defer rpgStore.Close()
@@ -1104,14 +1109,14 @@ func (s *Server) tryLoadRPG(ctx context.Context) (rpg.RPGStore, *rpg.QueryEngine
 	}
 	cfg, err := config.Load(s.projectRoot)
 	if err != nil {
-		return nil, nil, nil
+		return nil, nil, fmt.Errorf("failed to load config: %w", err)
 	}
 	if !cfg.RPG.Enabled {
 		return nil, nil, nil
 	}
 	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(s.projectRoot))
 	if err := rpgStore.Load(ctx); err != nil {
-		return nil, nil, nil
+		return nil, nil, fmt.Errorf("failed to load RPG store: %w", err)
 	}
 	graph := rpgStore.GetGraph()
 	if graph.Stats().TotalNodes == 0 {
