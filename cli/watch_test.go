@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +71,30 @@ func TestShowWatchStatus_StalePID(t *testing.T) {
 	}
 }
 
+func TestShowWatchStatus_WorktreeNotRunning(t *testing.T) {
+	logDir := t.TempDir()
+	err := showWatchStatus(logDir, "wt-1")
+	if err != nil {
+		t.Fatalf("showWatchStatus() failed: %v", err)
+	}
+}
+
+func TestShowWatchStatus_WorktreeRunning(t *testing.T) {
+	logDir := t.TempDir()
+	worktreeID := "wt-2"
+
+	pidPath := daemon.GetWorktreePIDFile(logDir, worktreeID)
+	content := strconv.Itoa(os.Getpid()) + "\n"
+	if err := os.WriteFile(pidPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write worktree PID file: %v", err)
+	}
+
+	err := showWatchStatus(logDir, worktreeID)
+	if err != nil {
+		t.Fatalf("showWatchStatus() failed: %v", err)
+	}
+}
+
 func TestStopWatchDaemon_NotRunning(t *testing.T) {
 	logDir := t.TempDir()
 
@@ -99,6 +125,14 @@ func TestStopWatchDaemon_StalePID(t *testing.T) {
 		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 			t.Error("Stale PID file was not removed")
 		}
+	}
+}
+
+func TestStopWatchDaemon_WorktreeNotRunning(t *testing.T) {
+	logDir := t.TempDir()
+	err := stopWatchDaemon(logDir, "wt-3")
+	if err != nil {
+		t.Fatalf("stopWatchDaemon() failed: %v", err)
 	}
 }
 
@@ -143,6 +177,29 @@ func TestStartBackgroundWatch_CleansStalePID(t *testing.T) {
 	// The actual startBackgroundWatch would spawn a process here,
 	// which we can't easily test in a unit test.
 	// This is better tested in integration tests.
+}
+
+func TestStartBackgroundWatch_WorktreeAlreadyRunning(t *testing.T) {
+	logDir := t.TempDir()
+	worktreeID := "wt-4"
+
+	pidPath := daemon.GetWorktreePIDFile(logDir, worktreeID)
+	content := strconv.Itoa(os.Getpid()) + "\n"
+	if err := os.WriteFile(pidPath, []byte(content), 0644); err != nil {
+		t.Fatalf("failed to write worktree PID file: %v", err)
+	}
+
+	originalWatchLogDir := watchLogDir
+	watchLogDir = ""
+	defer func() { watchLogDir = originalWatchLogDir }()
+
+	err := startBackgroundWatch(logDir, worktreeID)
+	if err == nil {
+		t.Fatal("startBackgroundWatch() should have failed when worktree watcher already running")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("startBackgroundWatch() error = %q, want message containing %q", err.Error(), "already running")
+	}
 }
 
 func TestRunWatch_CheckAlreadyRunning(t *testing.T) {
