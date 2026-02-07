@@ -64,6 +64,21 @@ func TestEnsureGitignoreEntry(t *testing.T) {
 		}
 	})
 
+	t.Run("adds newline before appending when missing trailing newline", func(t *testing.T) {
+		dir := t.TempDir()
+		os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("node_modules"), 0644)
+
+		ensureGitignoreEntry(dir, ".grepai/")
+
+		data, err := os.ReadFile(filepath.Join(dir, ".gitignore"))
+		if err != nil {
+			t.Fatalf("failed to read .gitignore: %v", err)
+		}
+		if string(data) != "node_modules\n.grepai/\n" {
+			t.Errorf("unexpected .gitignore content: %q", string(data))
+		}
+	})
+
 	t.Run("does not duplicate entry", func(t *testing.T) {
 		dir := t.TempDir()
 		os.WriteFile(filepath.Join(dir, ".gitignore"), []byte(".grepai/\n"), 0644)
