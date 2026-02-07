@@ -503,10 +503,20 @@ func runWatchForeground() error {
 		fmt.Printf("Starting grepai watch in %s\n", projectRoot)
 		fmt.Printf("Provider: %s (%s)\n", cfg.Embedder.Provider, cfg.Embedder.Model)
 		fmt.Printf("Backend: %s\n", cfg.Store.Backend)
+		if cfg.RPG.Enabled {
+			fmt.Printf("RPG: enabled (feature_mode: %s, llm: %s/%s)\n", cfg.RPG.FeatureMode, cfg.RPG.LLMProvider, cfg.RPG.LLMModel)
+		} else {
+			fmt.Printf("RPG: disabled\n")
+		}
 	} else {
 		log.Printf("Starting grepai watch in %s", projectRoot)
 		log.Printf("Provider: %s (%s)", cfg.Embedder.Provider, cfg.Embedder.Model)
 		log.Printf("Backend: %s", cfg.Store.Backend)
+		if cfg.RPG.Enabled {
+			log.Printf("RPG: enabled (feature_mode: %s, llm: %s/%s)", cfg.RPG.FeatureMode, cfg.RPG.LLMProvider, cfg.RPG.LLMModel)
+		} else {
+			log.Printf("RPG: disabled")
+		}
 	}
 
 	// Initialize embedder
