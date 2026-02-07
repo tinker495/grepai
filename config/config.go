@@ -453,9 +453,13 @@ func ensureGitignoreEntry(dir, entry string) {
 	}
 	defer f.Close()
 	if len(content) > 0 && content[len(content)-1] != '\n' {
-		f.WriteString("\n")
+		if _, err := f.WriteString("\n"); err != nil {
+			return
+		}
 	}
-	f.WriteString(entry + "\n")
+	if _, err := f.WriteString(entry + "\n"); err != nil {
+		return
+	}
 }
 
 // FindProjectRootWithGit extends FindProjectRoot with git worktree awareness.

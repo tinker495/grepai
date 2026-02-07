@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"syscall"
@@ -74,7 +75,10 @@ func (l *livenessCheck) start(_ int) <-chan struct{} {
 	ch := make(chan struct{})
 	go func() {
 		buf := make([]byte, 1)
-		l.pr.Read(buf) // blocks until EOF (child exit)
+		if _, err := l.pr.Read(buf); err != nil && err != io.EOF {
+			// Ignore read errors: liveness only needs unblocking on exit/close.
+			_ = err
+		}
 		l.pr.Close()
 		close(ch)
 	}()
