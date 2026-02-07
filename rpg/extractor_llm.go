@@ -26,6 +26,7 @@ type LLMExtractor struct {
 	cfg      LLMExtractorConfig
 	client   *http.Client
 	fallback *LocalExtractor
+	ctx      context.Context // parent context for cancellation propagation
 }
 
 // NewLLMExtractor creates an LLM-based feature extractor with local fallback.
@@ -42,10 +43,21 @@ func NewLLMExtractor(cfg LLMExtractorConfig) *LLMExtractor {
 
 func (e *LLMExtractor) Mode() string { return "llm" }
 
+// WithContext returns a copy of the extractor that uses the given context for LLM calls.
+func (e *LLMExtractor) WithContext(ctx context.Context) *LLMExtractor {
+	cp := *e
+	cp.ctx = ctx
+	return &cp
+}
+
 // ExtractFeature calls the LLM to generate a semantic feature label.
 // Falls back to local extraction on any error.
 func (e *LLMExtractor) ExtractFeature(symbolName, signature, receiver, comment string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), e.cfg.Timeout)
+	parent := e.ctx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, e.cfg.Timeout)
 	defer cancel()
 
 	label, err := e.callLLM(ctx, symbolName, signature, receiver, comment)
