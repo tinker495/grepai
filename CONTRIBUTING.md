@@ -6,7 +6,7 @@ Thank you for your interest in contributing to grepai! This document provides gu
 
 ### Prerequisites
 
-- Go 1.24 or later
+- Go 1.23 or later
 - Ollama (for local testing with embeddings)
 - Git
 
