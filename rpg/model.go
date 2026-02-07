@@ -2,6 +2,7 @@ package rpg
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -435,4 +436,54 @@ func MakeNodeID(kind NodeKind, parts ...string) string {
 	default:
 		return strings.Join(parts, ":")
 	}
+}
+
+// ValidationReport contains results from graph consistency checks.
+type ValidationReport struct {
+	DanglingEdges  []string // "edge from X to Y: node Y not found"
+	OrphanNodes    []string // nodes with zero edges
+	DuplicateEdges int
+}
+
+// Validate checks the graph for structural issues.
+func (g *Graph) Validate() ValidationReport {
+	var report ValidationReport
+
+	// Check for dangling edges (edges referencing non-existent nodes)
+	for _, e := range g.Edges {
+		if g.GetNode(e.From) == nil {
+			report.DanglingEdges = append(report.DanglingEdges, fmt.Sprintf("edge from %s to %s: node %s not found", e.From, e.To, e.From))
+		}
+		if g.GetNode(e.To) == nil {
+			report.DanglingEdges = append(report.DanglingEdges, fmt.Sprintf("edge from %s to %s: node %s not found", e.From, e.To, e.To))
+		}
+	}
+
+	// Check for orphan nodes (no edges at all)
+	for id := range g.Nodes {
+		hasEdge := false
+		for _, e := range g.Edges {
+			if e.From == id || e.To == id {
+				hasEdge = true
+				break
+			}
+		}
+		if !hasEdge {
+			report.OrphanNodes = append(report.OrphanNodes, id)
+		}
+	}
+	// Sort orphan nodes for deterministic output
+	sort.Strings(report.OrphanNodes)
+
+	// Check for duplicate edges (same from, to, type)
+	edgeSeen := make(map[string]bool)
+	for _, e := range g.Edges {
+		key := e.From + "|" + e.To + "|" + string(e.Type)
+		if edgeSeen[key] {
+			report.DuplicateEdges++
+		}
+		edgeSeen[key] = true
+	}
+
+	return report
 }

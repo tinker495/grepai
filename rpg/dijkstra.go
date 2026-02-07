@@ -22,6 +22,11 @@ func edgeCost(weight float64) float64 {
 // Returns (nil, nil, -1) if the target is unreachable.
 // Returns ([sourceID], nil, 0) if source == target.
 func (g *Graph) ShortestPath(source, target string, edgeTypeSet map[EdgeType]bool) ([]string, []*Edge, float64) {
+	return g.ShortestPathOpts(source, target, DistanceOptions{EdgeTypes: edgeTypeSet})
+}
+
+// ShortestPathOpts computes Dijkstra's shortest path with full options control.
+func (g *Graph) ShortestPathOpts(source, target string, opts DistanceOptions) ([]string, []*Edge, float64) {
 	if source == target {
 		if g.GetNode(source) == nil {
 			return nil, nil, -1
@@ -32,7 +37,9 @@ func (g *Graph) ShortestPath(source, target string, edgeTypeSet map[EdgeType]boo
 		return nil, nil, -1
 	}
 
-	filterEdges := len(edgeTypeSet) > 0
+	filterEdges := len(opts.EdgeTypes) > 0
+	dir := opts.Direction
+	metric := opts.Metric
 
 	dist := map[string]float64{source: 0}
 	prev := map[string]string{}    // prev node in shortest path
@@ -53,13 +60,10 @@ func (g *Graph) ShortestPath(source, target string, edgeTypeSet map[EdgeType]boo
 			continue // stale entry
 		}
 
-		// Collect edges in both directions for undirected traversal
-		var edges []*Edge
-		edges = append(edges, g.adjForward[cur.nodeID]...)
-		edges = append(edges, g.adjReverse[cur.nodeID]...)
+		edges := collectEdges(g, cur.nodeID, dir)
 
 		for _, e := range edges {
-			if filterEdges && !edgeTypeSet[e.Type] {
+			if filterEdges && !opts.EdgeTypes[e.Type] {
 				continue
 			}
 
@@ -73,7 +77,7 @@ func (g *Graph) ShortestPath(source, target string, edgeTypeSet map[EdgeType]boo
 				continue
 			}
 
-			newCost := cur.cost + edgeCost(e.Weight)
+			newCost := cur.cost + edgeCostWithMetric(e.Weight, metric)
 			if oldCost, ok := dist[neighbor]; !ok || newCost < oldCost {
 				dist[neighbor] = newCost
 				prev[neighbor] = cur.nodeID
@@ -107,6 +111,114 @@ func (g *Graph) ShortestPath(source, target string, edgeTypeSet map[EdgeType]boo
 	}
 
 	return path, pathEdges, dist[target]
+}
+
+// DijkstraDirection controls which edges are traversed.
+type DijkstraDirection string
+
+const (
+	DirBoth    DijkstraDirection = "both"    // traverse adjForward + adjReverse (default)
+	DirForward DijkstraDirection = "forward" // adjForward only
+	DirReverse DijkstraDirection = "reverse" // adjReverse only
+)
+
+// DistanceMetric controls how edge costs are computed.
+type DistanceMetric string
+
+const (
+	MetricCost DistanceMetric = "cost" // 1.0/weight (default)
+	MetricHops DistanceMetric = "hops" // always 1.0
+)
+
+// edgeCostWithMetric returns the traversal cost for an edge using the given metric.
+func edgeCostWithMetric(weight float64, metric DistanceMetric) float64 {
+	if metric == MetricHops {
+		return 1.0
+	}
+	return edgeCost(weight)
+}
+
+// collectEdges returns the edges to consider for a node based on direction.
+func collectEdges(g *Graph, nodeID string, dir DijkstraDirection) []*Edge {
+	switch dir {
+	case DirForward:
+		return g.adjForward[nodeID]
+	case DirReverse:
+		return g.adjReverse[nodeID]
+	default: // DirBoth
+		var edges []*Edge
+		edges = append(edges, g.adjForward[nodeID]...)
+		edges = append(edges, g.adjReverse[nodeID]...)
+		return edges
+	}
+}
+
+// DistanceOptions configures the DistancesFrom computation.
+type DistanceOptions struct {
+	EdgeTypes map[EdgeType]bool // nil = all edge types
+	MaxCost   float64           // 0 = unlimited; nodes beyond this cost are excluded
+	Direction DijkstraDirection // "" or DirBoth = both directions
+	Metric    DistanceMetric    // "" or MetricCost = cost metric
+}
+
+// DistancesFrom computes shortest-path distances from a single source to all
+// reachable nodes using Dijkstra's algorithm. It traverses edges bidirectionally.
+// Returns a map of nodeID -> cost. Nodes not in the map are unreachable.
+// When MaxCost > 0, nodes with cost exceeding MaxCost are excluded.
+func (g *Graph) DistancesFrom(source string, opts DistanceOptions) map[string]float64 {
+	if g.GetNode(source) == nil {
+		return nil
+	}
+
+	filterEdges := len(opts.EdgeTypes) > 0
+	dir := opts.Direction
+	metric := opts.Metric
+
+	dist := map[string]float64{source: 0}
+
+	pq := &priorityQueue{}
+	heap.Init(pq)
+	heap.Push(pq, &pqItem{nodeID: source, cost: 0})
+
+	for pq.Len() > 0 {
+		cur, _ := heap.Pop(pq).(*pqItem) //nolint:errcheck // heap.Pop always returns *pqItem
+
+		if cur.cost > dist[cur.nodeID] {
+			continue // stale entry
+		}
+
+		edges := collectEdges(g, cur.nodeID, dir)
+
+		for _, e := range edges {
+			if filterEdges && !opts.EdgeTypes[e.Type] {
+				continue
+			}
+
+			// Determine neighbor: the other end of the edge
+			neighbor := e.To
+			if neighbor == cur.nodeID {
+				neighbor = e.From
+			}
+
+			if g.GetNode(neighbor) == nil {
+				continue
+			}
+
+			newCost := cur.cost + edgeCostWithMetric(e.Weight, metric)
+
+			// Skip if beyond MaxCost
+			if opts.MaxCost > 0 && newCost > opts.MaxCost {
+				continue
+			}
+
+			if oldCost, ok := dist[neighbor]; !ok || newCost < oldCost {
+				dist[neighbor] = newCost
+				heap.Push(pq, &pqItem{nodeID: neighbor, cost: newCost})
+			}
+		}
+	}
+
+	return dist
 }
 
 // pqItem is an entry in the priority queue for Dijkstra.

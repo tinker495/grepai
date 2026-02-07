@@ -386,7 +386,7 @@ func TestDistanceFromRPGDisabledError(t *testing.T) {
 		{Chunk: store.Chunk{FilePath: "test.go", StartLine: 1, EndLine: 10}, Score: 0.9},
 	}
 
-	_, err := enrichWithRPG("/tmp/nonexistent", cfg, results, "sym:test:Func")
+	_, err := enrichWithRPG("/tmp/nonexistent", cfg, results, "sym:test:Func", "", "", 0)
 	if err == nil {
 		t.Fatal("expected error when distance-from used with RPG disabled")
 	}
@@ -407,7 +407,7 @@ func TestDistanceFromRPGLoadError(t *testing.T) {
 
 	// This will fail to load the RPG store (nonexistent path) and return error
 	// because distanceFrom is set
-	_, err := enrichWithRPG("/tmp/nonexistent-project", cfg, results, "sym:test:Func")
+	_, err := enrichWithRPG("/tmp/nonexistent-project", cfg, results, "sym:test:Func", "", "", 0)
 	if err == nil {
 		t.Fatal("expected error when RPG store cannot be loaded with distance-from set")
 	}
@@ -488,7 +488,7 @@ func TestDistancePrefilledToNegativeOne(t *testing.T) {
 	}
 
 	// Call enrichWithRPG with distance_from pointing to the disconnected node
-	enrichments, err := enrichWithRPG(tmpDir, cfg, results, "sym:other.go:Bar")
+	enrichments, err := enrichWithRPG(tmpDir, cfg, results, "sym:other.go:Bar", "", "", 0)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -515,7 +515,7 @@ func TestEnrichWithRPG_NoDistanceFrom_BestEffort(t *testing.T) {
 		{Chunk: store.Chunk{FilePath: "test.go", StartLine: 1, EndLine: 10}, Score: 0.9},
 	}
 
-	enrichments, err := enrichWithRPG("/tmp/nonexistent-project", cfg, results, "")
+	enrichments, err := enrichWithRPG("/tmp/nonexistent-project", cfg, results, "", "", "", 0)
 	if err != nil {
 		t.Fatalf("expected no error for best-effort RPG enrichment, got: %v", err)
 	}
@@ -588,7 +588,7 @@ func TestEnrichWithRPG_DistanceComputed(t *testing.T) {
 	}
 
 	// Compute distance from source to target
-	enrichments, err := enrichWithRPG(tmpDir, cfg, results, "sym:source.go:Start")
+	enrichments, err := enrichWithRPG(tmpDir, cfg, results, "sym:source.go:Start", "", "", 0)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -665,7 +665,7 @@ func TestEnrichWithRPG_MultipleResults_MixedDistances(t *testing.T) {
 		{Chunk: store.Chunk{FilePath: "c.go", StartLine: 1, EndLine: 8}, Score: 0.8},
 	}
 
-	enrichments, err := enrichWithRPG(tmpDir, cfg, results, "sym:a.go:Source")
+	enrichments, err := enrichWithRPG(tmpDir, cfg, results, "sym:a.go:Source", "", "", 0)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -768,7 +768,7 @@ func TestEnrichWithRPG_EmptyGraph(t *testing.T) {
 		{Chunk: store.Chunk{FilePath: "test.go", StartLine: 1, EndLine: 10}, Score: 0.9},
 	}
 
-	_, err := enrichWithRPG(tmpDir, cfg, results, "sym:test:Func")
+	_, err := enrichWithRPG(tmpDir, cfg, results, "sym:test:Func", "", "", 0)
 	if err == nil {
 		t.Fatal("expected error for empty RPG graph with distance-from")
 	}
@@ -810,7 +810,7 @@ func TestEnrichWithRPG_SourceNodeNotFound(t *testing.T) {
 		{Chunk: store.Chunk{FilePath: "test.go", StartLine: 1, EndLine: 10}, Score: 0.9},
 	}
 
-	_, err := enrichWithRPG(tmpDir, cfg, results, "sym:nonexistent:Missing")
+	_, err := enrichWithRPG(tmpDir, cfg, results, "sym:nonexistent:Missing", "", "", 0)
 	if err == nil {
 		t.Fatal("expected error for nonexistent source node")
 	}

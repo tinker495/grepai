@@ -72,7 +72,12 @@ Examples:
 	RunE: runTraceGraph,
 }
 
-var tracePathEdgeTypes string
+var (
+	tracePathEdgeTypes string
+	tracePathDirection string
+	tracePathMetric    string
+	tracePathExplain   bool
+)
 
 var tracePathCmd = &cobra.Command{
 	Use:   "path <source_id> <target_id>",
@@ -105,6 +110,9 @@ func init() {
 	tracePathCmd.Flags().BoolVarP(&traceTOON, "toon", "t", false, "Output results in TOON format (token-efficient for AI agents)")
 	tracePathCmd.MarkFlagsMutuallyExclusive("json", "toon")
 	tracePathCmd.Flags().StringVar(&tracePathEdgeTypes, "edge-types", "", "Comma-separated edge types to follow: feature_parent,contains,invokes,imports,maps_to_chunk,semantic_sim")
+	tracePathCmd.Flags().StringVar(&tracePathDirection, "direction", "both", "Traversal direction: forward, reverse, or both")
+	tracePathCmd.Flags().StringVar(&tracePathMetric, "metric", "cost", "Distance metric: cost (1/weight) or hops (uniform 1.0)")
+	tracePathCmd.Flags().BoolVar(&tracePathExplain, "explain", false, "Show detailed edge-by-edge breakdown with costs")
 
 	traceCmd.AddCommand(traceCallersCmd)
 	traceCmd.AddCommand(traceCalleesCmd)
@@ -388,11 +396,29 @@ func runTracePath(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Validate direction
+	direction := rpg.DijkstraDirection(tracePathDirection)
+	switch direction {
+	case rpg.DirForward, rpg.DirReverse, rpg.DirBoth, "":
+	default:
+		return fmt.Errorf("invalid direction: %s (must be forward, reverse, or both)", tracePathDirection)
+	}
+
+	// Validate metric
+	metric := rpg.DistanceMetric(tracePathMetric)
+	switch metric {
+	case rpg.MetricCost, rpg.MetricHops, "":
+	default:
+		return fmt.Errorf("invalid metric: %s (must be cost or hops)", tracePathMetric)
+	}
+
 	qe := rpg.NewQueryEngine(graph)
 	result, err := qe.ShortestPath(ctx, rpg.ShortestPathRequest{
 		SourceID:  sourceID,
 		TargetID:  targetID,
 		EdgeTypes: edgeTypes,
+		Direction: direction,
+		Metric:    metric,
 	})
 	if err != nil {
 		return fmt.Errorf("shortest path computation failed: %w", err)
@@ -412,6 +438,9 @@ func runTracePath(cmd *cobra.Command, args []string) error {
 		return nil
 	}
 
+	if tracePathExplain {
+		return displayPathResultExplain(result)
+	}
 	return displayPathResult(result)
 }
 
@@ -447,6 +476,101 @@ func displayPathResult(result *rpg.ShortestPathResult) error {
 				edgeType = string(step.Edge.Type)
 			}
 			fmt.Printf("  -> %s (cost: %.4f, via: %s)\n", nodeLabel, step.Cost, edgeType)
+		}
+	}
+
+	return nil
+}
+
+func displayPathResultExplain(result *rpg.ShortestPathResult) error {
+	if result.Distance < 0 {
+		src := "<unknown>"
+		tgt := "<unknown>"
+		if result.Source != nil {
+			src = result.Source.ID
+		}
+		if result.Target != nil {
+			tgt = result.Target.ID
+		}
+		fmt.Printf("No path found from %s to %s\n", src, tgt)
+		return nil
+	}
+
+	fmt.Printf("Shortest Path: %s -> %s\n", result.Source.ID, result.Target.ID)
+	fmt.Printf("Total Distance: %.4f (%d hops)\n", result.Distance, len(result.Edges))
+	fmt.Println(strings.Repeat("=", 70))
+
+	// Edge type distribution
+	edgeTypeCounts := make(map[rpg.EdgeType]int)
+	var maxEdgeCost float64
+	var bottleneckEdge *rpg.Edge
+	for _, e := range result.Edges {
+		edgeTypeCounts[e.Type]++
+		var c float64
+		if e.Weight <= 0 {
+			c = 10.0
+		} else {
+			c = 1.0 / e.Weight
+		}
+		if c > maxEdgeCost {
+			maxEdgeCost = c
+			bottleneckEdge = e
+		}
+	}
+
+	fmt.Println("\nSummary:")
+	fmt.Printf("  Hops: %d\n", len(result.Edges))
+	fmt.Printf("  Edge types: ")
+	first := true
+	for et, count := range edgeTypeCounts {
+		if !first {
+			fmt.Print(", ")
+		}
+		fmt.Printf("%s=%d", et, count)
+		first = false
+	}
+	fmt.Println()
+	if bottleneckEdge != nil {
+		fmt.Printf("  Bottleneck: %s -> %s (type: %s, weight: %.4f, cost: %.4f)\n",
+			bottleneckEdge.From, bottleneckEdge.To, bottleneckEdge.Type,
+			bottleneckEdge.Weight, maxEdgeCost)
+	}
+
+	fmt.Println("\nStep-by-step:")
+	fmt.Println(strings.Repeat("-", 70))
+
+	for i, step := range result.Steps {
+		nodeLabel := step.Node.ID
+		if step.Node.SymbolName != "" {
+			nodeLabel = fmt.Sprintf("%s (%s)", step.Node.ID, step.Node.SymbolName)
+		}
+
+		if i == 0 {
+			fmt.Printf("  [START] %s\n", nodeLabel)
+			fmt.Printf("          cumulative cost: %.4f\n", step.Cost)
+		} else {
+			edgeType := ""
+			edgeWeight := 0.0
+			edgeCostVal := 0.0
+			direction := "forward"
+			if step.Edge != nil {
+				edgeType = string(step.Edge.Type)
+				edgeWeight = step.Edge.Weight
+				if edgeWeight <= 0 {
+					edgeCostVal = 10.0
+				} else {
+					edgeCostVal = 1.0 / edgeWeight
+				}
+				// Determine traversal direction
+				if step.Edge.From != result.Steps[i-1].Node.ID {
+					direction = "reverse"
+				}
+			}
+			fmt.Printf("    |  edge: %s (weight: %.4f, cost: %.4f, dir: %s)\n",
+				edgeType, edgeWeight, edgeCostVal, direction)
+			fmt.Printf("    v\n")
+			fmt.Printf("  [%d] %s\n", i, nodeLabel)
+			fmt.Printf("      cumulative cost: %.4f\n", step.Cost)
 		}
 	}
 

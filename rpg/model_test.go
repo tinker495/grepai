@@ -550,3 +550,78 @@ func TestMakeNodeID(t *testing.T) {
 		})
 	}
 }
+
+func TestValidate_HealthyGraph(t *testing.T) {
+	g := NewGraph()
+	now := time.Now()
+
+	n1 := &Node{ID: "n1", Kind: KindSymbol, UpdatedAt: now}
+	n2 := &Node{ID: "n2", Kind: KindSymbol, UpdatedAt: now}
+	g.AddNode(n1)
+	g.AddNode(n2)
+	g.AddEdge(&Edge{From: "n1", To: "n2", Type: EdgeInvokes, Weight: 1.0, UpdatedAt: now})
+
+	report := g.Validate()
+	if len(report.DanglingEdges) != 0 {
+		t.Errorf("expected 0 dangling edges, got %d", len(report.DanglingEdges))
+	}
+	if len(report.OrphanNodes) != 0 {
+		t.Errorf("expected 0 orphan nodes, got %d", len(report.OrphanNodes))
+	}
+	if report.DuplicateEdges != 0 {
+		t.Errorf("expected 0 duplicate edges, got %d", report.DuplicateEdges)
+	}
+}
+
+func TestValidate_DanglingEdges(t *testing.T) {
+	g := NewGraph()
+	now := time.Now()
+
+	n1 := &Node{ID: "n1", Kind: KindSymbol, UpdatedAt: now}
+	g.AddNode(n1)
+	// Add edge to non-existent node directly to Edges slice + adjacency
+	g.Edges = append(g.Edges, &Edge{From: "n1", To: "nonexistent", Type: EdgeInvokes, Weight: 1.0, UpdatedAt: now})
+
+	report := g.Validate()
+	if len(report.DanglingEdges) != 1 {
+		t.Errorf("expected 1 dangling edge, got %d: %v", len(report.DanglingEdges), report.DanglingEdges)
+	}
+}
+
+func TestValidate_OrphanNodes(t *testing.T) {
+	g := NewGraph()
+	now := time.Now()
+
+	n1 := &Node{ID: "n1", Kind: KindSymbol, UpdatedAt: now}
+	n2 := &Node{ID: "orphan", Kind: KindSymbol, UpdatedAt: now}
+	n3 := &Node{ID: "n3", Kind: KindSymbol, UpdatedAt: now}
+	g.AddNode(n1)
+	g.AddNode(n2)
+	g.AddNode(n3)
+	g.AddEdge(&Edge{From: "n1", To: "n3", Type: EdgeInvokes, Weight: 1.0, UpdatedAt: now})
+
+	report := g.Validate()
+	if len(report.OrphanNodes) != 1 {
+		t.Errorf("expected 1 orphan node, got %d: %v", len(report.OrphanNodes), report.OrphanNodes)
+	}
+	if len(report.OrphanNodes) > 0 && report.OrphanNodes[0] != "orphan" {
+		t.Errorf("expected orphan node 'orphan', got %s", report.OrphanNodes[0])
+	}
+}
+
+func TestValidate_DuplicateEdges(t *testing.T) {
+	g := NewGraph()
+	now := time.Now()
+
+	n1 := &Node{ID: "n1", Kind: KindSymbol, UpdatedAt: now}
+	n2 := &Node{ID: "n2", Kind: KindSymbol, UpdatedAt: now}
+	g.AddNode(n1)
+	g.AddNode(n2)
+	g.AddEdge(&Edge{From: "n1", To: "n2", Type: EdgeInvokes, Weight: 1.0, UpdatedAt: now})
+	g.AddEdge(&Edge{From: "n1", To: "n2", Type: EdgeInvokes, Weight: 0.5, UpdatedAt: now}) // duplicate
+
+	report := g.Validate()
+	if report.DuplicateEdges != 1 {
+		t.Errorf("expected 1 duplicate edge, got %d", report.DuplicateEdges)
+	}
+}

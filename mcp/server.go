@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
+	"sort"
 	"strings"
 
 	"github.com/alpkeskin/gotoon"
@@ -90,6 +92,14 @@ type IndexStatus struct {
 	RPGEdges     int    `json:"rpg_edges,omitempty"`
 }
 
+// mcpCombinedScore computes score / (1 + alpha * distance).
+func mcpCombinedScore(score float32, distance *float64, alpha float64) float64 {
+	if distance == nil || *distance < 0 {
+		return 0
+	}
+	return float64(score) / (1 + alpha*math.Abs(*distance))
+}
+
 // encodeOutput encodes data in the specified format (json or toon).
 func encodeOutput(data any, format string) (string, error) {
 	switch format {
@@ -168,6 +178,30 @@ func (s *Server) registerTools() {
 		),
 		mcp.WithString("distance_from",
 			mcp.Description("RPG node ID to compute distance from each result (requires RPG enabled)"),
+		),
+		mcp.WithString("distance_from_symbol",
+			mcp.Description("Symbol name to resolve to RPG node ID for distance computation"),
+		),
+		mcp.WithString("distance_from_file",
+			mcp.Description("File path to use as RPG node ID for distance computation"),
+		),
+		mcp.WithNumber("distance_max",
+			mcp.Description("Maximum distance to include (0 = no limit)"),
+		),
+		mcp.WithString("distance_direction",
+			mcp.Description("Distance traversal direction: 'forward', 'reverse', or 'both' (default: 'both')"),
+		),
+		mcp.WithString("distance_metric",
+			mcp.Description("Distance metric: 'cost' (1/weight, default) or 'hops' (uniform 1.0)"),
+		),
+		mcp.WithString("distance_edge_types",
+			mcp.Description("Comma-separated edge types for distance: feature_parent, contains, invokes, imports, maps_to_chunk, semantic_sim"),
+		),
+		mcp.WithString("sort",
+			mcp.Description("Sort results by: 'score' (default), 'distance', or 'combined'"),
+		),
+		mcp.WithNumber("distance_weight",
+			mcp.Description("Alpha for combined sort: combined = score / (1 + alpha * distance). Default: 0.0"),
 		),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
@@ -304,6 +338,12 @@ func (s *Server) registerTools() {
 		mcp.WithString("edge_types",
 			mcp.Description("Comma-separated edge types to follow: feature_parent, contains, invokes, imports, maps_to_chunk, semantic_sim"),
 		),
+		mcp.WithString("direction",
+			mcp.Description("Traversal direction: 'forward', 'reverse', or 'both' (default: 'both')"),
+		),
+		mcp.WithString("metric",
+			mcp.Description("Distance metric: 'cost' (1/weight, default) or 'hops' (uniform 1.0)"),
+		),
 		mcp.WithString("format",
 			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
 		),
@@ -328,15 +368,39 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	workspace := request.GetString("workspace", "")
 	projects := request.GetString("projects", "")
 	distanceFrom := request.GetString("distance_from", "")
+	distanceFromSymbol := request.GetString("distance_from_symbol", "")
+	distanceFromFile := request.GetString("distance_from_file", "")
+	distanceMax := float64(request.GetInt("distance_max", 0))
+	distanceDirection := request.GetString("distance_direction", "both")
+	distanceMetric := request.GetString("distance_metric", "cost")
+	distanceEdgeTypes := request.GetString("distance_edge_types", "")
+	sortMode := request.GetString("sort", "score")
+	distanceWeight := request.GetFloat("distance_weight", 0.0)
+
+	// Validate mutual exclusivity of distance-from variants
+	distCount := 0
+	if distanceFrom != "" {
+		distCount++
+	}
+	if distanceFromSymbol != "" {
+		distCount++
+	}
+	if distanceFromFile != "" {
+		distCount++
+	}
+	if distCount > 1 {
+		return mcp.NewToolResultError("only one of distance_from, distance_from_symbol, distance_from_file can be specified"), nil
+	}
 
 	// Auto-inject workspace when server is in workspace mode
 	if workspace == "" && s.workspaceName != "" {
 		workspace = s.workspaceName
 	}
 
-	// Validate distance_from with workspace
-	if distanceFrom != "" && workspace != "" {
-		return mcp.NewToolResultError("distance_from is not supported with workspace search (RPG is per-project)"), nil
+	// Validate distance flags with workspace
+	wantDistance := distCount > 0
+	if wantDistance && workspace != "" {
+		return mcp.NewToolResultError("distance parameters are not supported with workspace search (RPG is per-project)"), nil
 	}
 
 	// Validate format
@@ -355,9 +419,9 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(fmt.Sprintf("failed to load configuration: %v", err)), nil
 	}
 
-	// Validate distance_from requires RPG
-	if distanceFrom != "" && !cfg.RPG.Enabled {
-		return mcp.NewToolResultError("distance_from requires RPG to be enabled (set rpg.enabled: true in config)"), nil
+	// Validate distance flags require RPG
+	if wantDistance && !cfg.RPG.Enabled {
+		return mcp.NewToolResultError("distance parameters require RPG to be enabled (set rpg.enabled: true in config)"), nil
 	}
 
 	// Initialize embedder
@@ -390,56 +454,141 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	rpgData := make(map[int]rpgInfo)
 	rpgSt, qe, rpgErr := s.tryLoadRPG(ctx)
 	if rpgErr != nil {
-		if distanceFrom != "" {
+		if wantDistance {
 			return mcp.NewToolResultError(fmt.Sprintf("failed to load RPG for distance computation: %v", rpgErr)), nil
 		}
 		log.Printf("Warning: RPG enrichment unavailable: %v", rpgErr)
 	}
-	if distanceFrom != "" && rpgSt == nil {
+	if wantDistance && rpgSt == nil {
 		return mcp.NewToolResultError("RPG index is not available for distance computation"), nil
 	}
 	if rpgSt != nil && qe != nil {
 		defer rpgSt.Close()
 		graph := rpgSt.GetGraph()
 
+		// Resolve the distance source node ID
+		resolvedSource := distanceFrom
+		if distanceFromSymbol != "" {
+			matches, resolveErr := qe.ResolveSymbol(distanceFromSymbol)
+			if resolveErr != nil {
+				return mcp.NewToolResultError(resolveErr.Error()), nil
+			}
+			if len(matches) > 1 {
+				var candidates []string
+				for _, m := range matches {
+					candidates = append(candidates, fmt.Sprintf("%s (%s)", m.ID, m.Path))
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("ambiguous symbol %q, %d candidates: %s", distanceFromSymbol, len(matches), strings.Join(candidates, ", "))), nil
+			}
+			resolvedSource = matches[0].ID
+		} else if distanceFromFile != "" {
+			resolvedSource = "file:" + distanceFromFile
+		}
+
 		// Validate source node exists when distance is requested
-		if distanceFrom != "" && graph.GetNode(distanceFrom) == nil {
-			return mcp.NewToolResultError(fmt.Sprintf("distance_from node not found in RPG graph: %s", distanceFrom)), nil
+		if resolvedSource != "" && graph.GetNode(resolvedSource) == nil {
+			return mcp.NewToolResultError(fmt.Sprintf("distance source node not found in RPG graph: %s", resolvedSource)), nil
 		}
 
 		// Pre-fill distance to -1 for all results when distance is requested
-		if distanceFrom != "" {
+		if resolvedSource != "" {
 			for i := range results {
 				d := -1.0
 				rpgData[i] = rpgInfo{distance: &d}
 			}
 		}
 
+		// First pass: collect target node IDs and enrich with feature paths
+		targetNodeIDs := make(map[int]string)
 		for i, r := range results {
 			nodes := graph.GetNodesByFile(r.Chunk.FilePath)
 			for _, n := range nodes {
 				if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.EndLine && r.Chunk.StartLine <= n.EndLine {
 					info := rpgData[i]
-					fetchRes, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
-					if err == nil && fetchRes != nil {
+					fetchRes, fetchErr := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
+					if fetchErr == nil && fetchRes != nil {
 						info.featurePath = fetchRes.FeaturePath
 						info.symbolName = n.SymbolName
 					}
-					if distanceFrom != "" {
-						pathRes, pathErr := qe.ShortestPath(ctx, rpg.ShortestPathRequest{
-							SourceID: distanceFrom,
-							TargetID: n.ID,
-						})
-						if pathErr == nil && pathRes != nil {
-							d := pathRes.Distance
-							info.distance = &d
-						}
-					}
 					rpgData[i] = info
+					targetNodeIDs[i] = n.ID
 					break
 				}
 			}
 		}
+
+		// Second pass: single DistancesFrom call
+		if resolvedSource != "" {
+			distReq := rpg.DistancesFromRequest{
+				SourceID:  resolvedSource,
+				MaxCost:   distanceMax,
+				Direction: rpg.DijkstraDirection(distanceDirection),
+				Metric:    rpg.DistanceMetric(distanceMetric),
+			}
+			if distanceEdgeTypes != "" {
+				for _, et := range strings.Split(distanceEdgeTypes, ",") {
+					et = strings.TrimSpace(et)
+					if et != "" {
+						distReq.EdgeTypes = append(distReq.EdgeTypes, rpg.EdgeType(et))
+					}
+				}
+			}
+			distResult, distErr := qe.DistancesFrom(ctx, distReq)
+			if distErr == nil && distResult != nil {
+				for i := range results {
+					nid, ok := targetNodeIDs[i]
+					if !ok {
+						continue
+					}
+					info := rpgData[i]
+					if d, found := distResult.Distances[nid]; found {
+						info.distance = &d
+					}
+					rpgData[i] = info
+				}
+			}
+		}
+	}
+
+	// Sort results if requested
+	if sortMode != "" && sortMode != "score" {
+		indices := make([]int, len(results))
+		for i := range indices {
+			indices[i] = i
+		}
+		sort.SliceStable(indices, func(a, b int) bool {
+			switch sortMode {
+			case "distance":
+				da := rpgData[indices[a]].distance
+				db := rpgData[indices[b]].distance
+				if da == nil && db == nil {
+					return false
+				}
+				if da == nil {
+					return false
+				}
+				if db == nil {
+					return true
+				}
+				return *da < *db
+			case "combined":
+				ca := mcpCombinedScore(results[indices[a]].Score, rpgData[indices[a]].distance, distanceWeight)
+				cb := mcpCombinedScore(results[indices[b]].Score, rpgData[indices[b]].distance, distanceWeight)
+				return ca > cb
+			default:
+				return results[indices[a]].Score > results[indices[b]].Score
+			}
+		})
+		sorted := make([]store.SearchResult, len(results))
+		sortedRPG := make(map[int]rpgInfo)
+		for newIdx, oldIdx := range indices {
+			sorted[newIdx] = results[oldIdx]
+			if info, ok := rpgData[oldIdx]; ok {
+				sortedRPG[newIdx] = info
+			}
+		}
+		results = sorted
+		rpgData = sortedRPG
 	}
 
 	var data any
@@ -1407,11 +1556,29 @@ func (s *Server) handleTracePath(ctx context.Context, request mcp.CallToolReques
 	}
 
 	edgeTypesStr := request.GetString("edge_types", "")
+	directionStr := request.GetString("direction", "both")
+	metricStr := request.GetString("metric", "cost")
 	format := request.GetString("format", "json")
 
 	// Validate format
 	if format != "json" && format != "toon" {
 		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Validate direction
+	direction := rpg.DijkstraDirection(directionStr)
+	switch direction {
+	case rpg.DirForward, rpg.DirReverse, rpg.DirBoth:
+	default:
+		return mcp.NewToolResultError("direction must be 'forward', 'reverse', or 'both'"), nil
+	}
+
+	// Validate metric
+	metric := rpg.DistanceMetric(metricStr)
+	switch metric {
+	case rpg.MetricCost, rpg.MetricHops:
+	default:
+		return mcp.NewToolResultError("metric must be 'cost' or 'hops'"), nil
 	}
 
 	// Load RPG
@@ -1451,6 +1618,8 @@ func (s *Server) handleTracePath(ctx context.Context, request mcp.CallToolReques
 		SourceID:  sourceID,
 		TargetID:  targetID,
 		EdgeTypes: edgeTypes,
+		Direction: direction,
+		Metric:    metric,
 	})
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("shortest path failed: %v", err)), nil

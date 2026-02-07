@@ -2,6 +2,7 @@ package rpg
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -55,9 +56,11 @@ type ExploreResult struct {
 
 // ShortestPathRequest is the input for ShortestPath.
 type ShortestPathRequest struct {
-	SourceID  string     `json:"source_id"`
-	TargetID  string     `json:"target_id"`
-	EdgeTypes []EdgeType `json:"edge_types,omitempty"`
+	SourceID  string            `json:"source_id"`
+	TargetID  string            `json:"target_id"`
+	EdgeTypes []EdgeType        `json:"edge_types,omitempty"`
+	Direction DijkstraDirection `json:"direction,omitempty"` // forward, reverse, both (default: both)
+	Metric    DistanceMetric    `json:"metric,omitempty"`    // cost, hops (default: cost)
 }
 
 // PathStep represents one node along a shortest path with cumulative cost.
@@ -342,7 +345,11 @@ func (qe *QueryEngine) ShortestPath(_ context.Context, req ShortestPathRequest) 
 		edgeTypeSet[et] = true
 	}
 
-	nodeIDs, edges, totalCost := qe.graph.ShortestPath(req.SourceID, req.TargetID, edgeTypeSet)
+	nodeIDs, edges, totalCost := qe.graph.ShortestPathOpts(req.SourceID, req.TargetID, DistanceOptions{
+		EdgeTypes: edgeTypeSet,
+		Direction: req.Direction,
+		Metric:    req.Metric,
+	})
 
 	result := &ShortestPathResult{
 		Source:   sourceNode,
@@ -357,6 +364,7 @@ func (qe *QueryEngine) ShortestPath(_ context.Context, req ShortestPathRequest) 
 	}
 
 	// Build steps with cumulative cost
+	metric := req.Metric
 	var cumCost float64
 	for i, id := range nodeIDs {
 		step := PathStep{
@@ -364,7 +372,7 @@ func (qe *QueryEngine) ShortestPath(_ context.Context, req ShortestPathRequest) 
 		}
 		if i > 0 && i-1 < len(edges) {
 			edge := edges[i-1]
-			cumCost += edgeCost(edge.Weight)
+			cumCost += edgeCostWithMetric(edge.Weight, metric)
 			step.Edge = edge
 		}
 		step.Cost = cumCost
@@ -372,6 +380,65 @@ func (qe *QueryEngine) ShortestPath(_ context.Context, req ShortestPathRequest) 
 	}
 
 	return result, nil
+}
+
+// DistancesFromRequest is the input for DistancesFrom.
+type DistancesFromRequest struct {
+	SourceID  string            `json:"source_id"`
+	EdgeTypes []EdgeType        `json:"edge_types,omitempty"`
+	MaxCost   float64           `json:"max_cost,omitempty"`
+	Direction DijkstraDirection `json:"direction,omitempty"` // forward, reverse, both (default: both)
+	Metric    DistanceMetric    `json:"metric,omitempty"`    // cost, hops (default: cost)
+}
+
+// DistancesFromResult contains distances from a source node to all reachable nodes.
+type DistancesFromResult struct {
+	Source    *Node              `json:"source"`
+	Distances map[string]float64 `json:"distances"`
+}
+
+// DistancesFrom computes shortest-path distances from a source to all reachable nodes.
+func (qe *QueryEngine) DistancesFrom(_ context.Context, req DistancesFromRequest) (*DistancesFromResult, error) {
+	sourceNode := qe.graph.GetNode(req.SourceID)
+	if sourceNode == nil {
+		return nil, fmt.Errorf("source node not found: %s", req.SourceID)
+	}
+
+	edgeTypeSet := make(map[EdgeType]bool, len(req.EdgeTypes))
+	for _, et := range req.EdgeTypes {
+		edgeTypeSet[et] = true
+	}
+
+	opts := DistanceOptions{
+		EdgeTypes: edgeTypeSet,
+		MaxCost:   req.MaxCost,
+		Direction: req.Direction,
+		Metric:    req.Metric,
+	}
+
+	distances := qe.graph.DistancesFrom(req.SourceID, opts)
+
+	return &DistancesFromResult{
+		Source:    sourceNode,
+		Distances: distances,
+	}, nil
+}
+
+// ResolveSymbol finds RPG nodes matching a symbol name.
+// Returns an error if no match is found or if multiple ambiguous matches exist.
+func (qe *QueryEngine) ResolveSymbol(name string) ([]*Node, error) {
+	var matches []*Node
+	for _, n := range qe.graph.GetNodesByKind(KindSymbol) {
+		if n.SymbolName == name {
+			matches = append(matches, n)
+		}
+	}
+
+	if len(matches) == 0 {
+		return nil, fmt.Errorf("symbol not found in RPG graph: %s", name)
+	}
+
+	return matches, nil
 }
 
 // getFeaturePath returns the full feature path for a node.

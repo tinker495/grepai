@@ -2,6 +2,7 @@ package rpg
 
 import (
 	"context"
+	"math"
 	"testing"
 )
 
@@ -683,6 +684,116 @@ func TestFindParentID(t *testing.T) {
 	if noParent != "" {
 		t.Errorf("Expected empty parent, got %s", noParent)
 	}
+}
+
+func TestResolveSymbol(t *testing.T) {
+	g := NewGraph()
+
+	sym1 := &Node{ID: "sym:server.go:HandleRequest", Kind: KindSymbol, SymbolName: "HandleRequest", Path: "server.go"}
+	sym2 := &Node{ID: "sym:auth.go:ValidateToken", Kind: KindSymbol, SymbolName: "ValidateToken", Path: "auth.go"}
+	sym3 := &Node{ID: "sym:handler.go:HandleRequest", Kind: KindSymbol, SymbolName: "HandleRequest", Path: "handler.go"}
+
+	g.AddNode(sym1)
+	g.AddNode(sym2)
+	g.AddNode(sym3)
+
+	qe := NewQueryEngine(g)
+
+	t.Run("unique match", func(t *testing.T) {
+		matches, err := qe.ResolveSymbol("ValidateToken")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(matches) != 1 {
+			t.Fatalf("expected 1 match, got %d", len(matches))
+		}
+		if matches[0].ID != sym2.ID {
+			t.Errorf("expected %s, got %s", sym2.ID, matches[0].ID)
+		}
+	})
+
+	t.Run("ambiguous match returns multiple", func(t *testing.T) {
+		matches, err := qe.ResolveSymbol("HandleRequest")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(matches) != 2 {
+			t.Fatalf("expected 2 matches, got %d", len(matches))
+		}
+	})
+
+	t.Run("not found returns error", func(t *testing.T) {
+		_, err := qe.ResolveSymbol("NonExistent")
+		if err == nil {
+			t.Fatal("expected error for non-existent symbol")
+		}
+	})
+}
+
+func TestQueryEngine_DistancesFrom(t *testing.T) {
+	g := makeTestGraph(
+		[]struct{ id, kind string }{
+			{"A", "symbol"}, {"B", "file"}, {"C", "symbol"},
+		},
+		[]struct {
+			from, to, edgeType string
+			weight             float64
+		}{
+			{"A", "B", "contains", 1.0},
+			{"B", "C", "contains", 0.8},
+		},
+	)
+
+	qe := NewQueryEngine(g)
+	ctx := context.Background()
+
+	t.Run("basic distances", func(t *testing.T) {
+		result, err := qe.DistancesFrom(ctx, DistancesFromRequest{
+			SourceID: "A",
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if result.Source.ID != "A" {
+			t.Errorf("expected source A, got %s", result.Source.ID)
+		}
+
+		// A=0, B=1.0, C=1.0+1.25=2.25
+		if math.Abs(result.Distances["A"]-0) > 1e-9 {
+			t.Errorf("expected dist[A]=0, got %v", result.Distances["A"])
+		}
+		if math.Abs(result.Distances["B"]-1.0) > 1e-9 {
+			t.Errorf("expected dist[B]=1.0, got %v", result.Distances["B"])
+		}
+		if math.Abs(result.Distances["C"]-2.25) > 1e-9 {
+			t.Errorf("expected dist[C]=2.25, got %v", result.Distances["C"])
+		}
+	})
+
+	t.Run("with max cost", func(t *testing.T) {
+		result, err := qe.DistancesFrom(ctx, DistancesFromRequest{
+			SourceID: "A",
+			MaxCost:  1.5,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if _, ok := result.Distances["B"]; !ok {
+			t.Error("expected B within max cost")
+		}
+		if _, ok := result.Distances["C"]; ok {
+			t.Error("expected C pruned by max cost")
+		}
+	})
+
+	t.Run("nonexistent source returns error", func(t *testing.T) {
+		_, err := qe.DistancesFrom(ctx, DistancesFromRequest{
+			SourceID: "X",
+		})
+		if err == nil {
+			t.Fatal("expected error for nonexistent source")
+		}
+	})
 }
 
 func TestGetFeaturePath(t *testing.T) {

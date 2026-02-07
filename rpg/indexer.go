@@ -3,8 +3,8 @@ package rpg
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -128,27 +128,31 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 	// Step 2: Wire invocation edges from call graph
 	callEdges, callErr := symbolStore.GetCallEdges(ctx)
 	if callErr == nil {
+		// Build symbol-by-name index for fast callee resolution
+		symbolByName := make(map[string][]*Node)
+		for _, n := range graph.GetNodesByKind(KindSymbol) {
+			symbolByName[n.SymbolName] = append(symbolByName[n.SymbolName], n)
+		}
+
 		for _, ce := range callEdges {
 			callerID := findSymbolNodeID(graph, ce.Caller, ce.File, ce.Line)
-			// For callee, look up in all files
-			calleeNodes := graph.GetNodesByKind(KindSymbol)
+			// For callee, look up in symbol index
+			calleeNodes := symbolByName[ce.Callee]
 			var bestMatch *Node
 			var samePackageMatch *Node
 			for _, cn := range calleeNodes {
-				if cn.SymbolName == ce.Callee {
-					// Priority 1: same-file match (break immediately)
-					if cn.Path == ce.File {
-						bestMatch = cn
-						break
-					}
-					// Priority 2: same-package match
-					if samePackageMatch == nil && filepath.Dir(cn.Path) == filepath.Dir(ce.File) {
-						samePackageMatch = cn
-					}
-					// Priority 3: any match (first seen)
-					if bestMatch == nil {
-						bestMatch = cn
-					}
+				// Priority 1: same-file match (break immediately)
+				if cn.Path == ce.File {
+					bestMatch = cn
+					break
+				}
+				// Priority 2: same-package match
+				if samePackageMatch == nil && filepath.Dir(cn.Path) == filepath.Dir(ce.File) {
+					samePackageMatch = cn
+				}
+				// Priority 3: any match (first seen)
+				if bestMatch == nil {
+					bestMatch = cn
 				}
 			}
 			// Prefer same-package over random cross-package match
@@ -368,7 +372,7 @@ func overlaps(start1, end1, start2, end2 int) bool {
 
 // capGroup splits or samples a verb group that exceeds maxFeatureGroupSize.
 // Strategy "split" partitions by directory, preserving locality; "sample" (default)
-// randomly samples down to cap size.
+// deterministically samples down to cap size by sorting on node ID.
 func capGroup(group []*Node, strategy string) [][]*Node {
 	if len(group) <= maxFeatureGroupSize {
 		return [][]*Node{group}
@@ -386,14 +390,14 @@ func capGroup(group []*Node, strategy string) [][]*Node {
 				continue
 			}
 			if len(sub) > maxFeatureGroupSize {
-				rand.Shuffle(len(sub), func(i, j int) { sub[i], sub[j] = sub[j], sub[i] })
+				sort.Slice(sub, func(i, j int) bool { return sub[i].ID < sub[j].ID })
 				sub = sub[:maxFeatureGroupSize]
 			}
 			result = append(result, sub)
 		}
 		return result
 	default: // "sample"
-		rand.Shuffle(len(group), func(i, j int) { group[i], group[j] = group[j], group[i] })
+		sort.Slice(group, func(i, j int) bool { return group[i].ID < group[j].ID })
 		return [][]*Node{group[:maxFeatureGroupSize]}
 	}
 }

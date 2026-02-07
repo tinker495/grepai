@@ -9,6 +9,122 @@ import (
 	"github.com/yoanbernabeu/grepai/store"
 )
 
+func TestCapGroup_Deterministic(t *testing.T) {
+	// Create a group larger than maxFeatureGroupSize with random-looking IDs
+	group := make([]*Node, maxFeatureGroupSize+50)
+	for i := range group {
+		group[i] = &Node{ID: fmt.Sprintf("sym:pkg%d/file.go:Func%d", i, i), Path: fmt.Sprintf("pkg%d/file.go", i)}
+	}
+
+	// Make a copy
+	groupCopy := make([]*Node, len(group))
+	copy(groupCopy, group)
+
+	// Run capGroup twice on copies
+	result1 := capGroup(group, "sample")
+	result2 := capGroup(groupCopy, "sample")
+
+	if len(result1) != 1 || len(result2) != 1 {
+		t.Fatal("expected 1 subgroup each")
+	}
+	if len(result1[0]) != len(result2[0]) {
+		t.Fatal("different sizes")
+	}
+	for i := range result1[0] {
+		if result1[0][i].ID != result2[0][i].ID {
+			t.Errorf("result differs at index %d: %s vs %s", i, result1[0][i].ID, result2[0][i].ID)
+		}
+	}
+}
+
+func TestCapGroup_SplitStrategy_Deterministic(t *testing.T) {
+	// Create a group with multiple directories, each exceeding maxFeatureGroupSize
+	group := make([]*Node, 0)
+	for dir := 0; dir < 3; dir++ {
+		for i := 0; i < maxFeatureGroupSize+20; i++ {
+			node := &Node{
+				ID:   fmt.Sprintf("sym:dir%d/file%d.go:Func%d", dir, i, i),
+				Path: fmt.Sprintf("dir%d/file%d.go", dir, i),
+			}
+			group = append(group, node)
+		}
+	}
+
+	// Make a copy
+	groupCopy := make([]*Node, len(group))
+	copy(groupCopy, group)
+
+	// Run capGroup twice with "split" strategy
+	result1 := capGroup(group, "split")
+	result2 := capGroup(groupCopy, "split")
+
+	if len(result1) != len(result2) {
+		t.Fatalf("different number of subgroups: %d vs %d", len(result1), len(result2))
+	}
+
+	// Build sets of node IDs from each result for comparison
+	// (map iteration order is non-deterministic, so subgroup order may vary)
+	nodeSet1 := make(map[string]bool)
+	nodeSet2 := make(map[string]bool)
+
+	for _, sg := range result1 {
+		for _, n := range sg {
+			nodeSet1[n.ID] = true
+		}
+	}
+	for _, sg := range result2 {
+		for _, n := range sg {
+			nodeSet2[n.ID] = true
+		}
+	}
+
+	// Both results should contain the same set of nodes
+	if len(nodeSet1) != len(nodeSet2) {
+		t.Fatalf("different total node counts: %d vs %d", len(nodeSet1), len(nodeSet2))
+	}
+	for id := range nodeSet1 {
+		if !nodeSet2[id] {
+			t.Errorf("node %s in result1 but not in result2", id)
+		}
+	}
+
+	// Each individual subgroup should be deterministic (same order within the subgroup)
+	// Build directory -> subgroup mapping
+	dirToSG1 := make(map[string][]*Node)
+	dirToSG2 := make(map[string][]*Node)
+
+	for _, sg := range result1 {
+		if len(sg) > 0 {
+			dir := filepath.Dir(sg[0].Path)
+			dirToSG1[dir] = sg
+		}
+	}
+	for _, sg := range result2 {
+		if len(sg) > 0 {
+			dir := filepath.Dir(sg[0].Path)
+			dirToSG2[dir] = sg
+		}
+	}
+
+	// For each directory, the subgroup content and order should be identical
+	for dir, sg1 := range dirToSG1 {
+		sg2, ok := dirToSG2[dir]
+		if !ok {
+			t.Errorf("directory %s in result1 but not in result2", dir)
+			continue
+		}
+		if len(sg1) != len(sg2) {
+			t.Errorf("directory %s has different subgroup sizes: %d vs %d", dir, len(sg1), len(sg2))
+			continue
+		}
+		for i := range sg1 {
+			if sg1[i].ID != sg2[i].ID {
+				t.Errorf("directory %s subgroup differs at index %d: %s vs %s", dir, i, sg1[i].ID, sg2[i].ID)
+			}
+		}
+	}
+}
+
 func TestLinkChunksForFile_NoAccumulation(t *testing.T) {
 	// Setup: create a graph with a file node and symbol node
 	g := NewGraph()
