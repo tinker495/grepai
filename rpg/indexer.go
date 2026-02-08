@@ -156,92 +156,14 @@ func (idx *RPGIndexer) BuildFullWithProgress(ctx context.Context, symbolStore tr
 		emitBuildProgress(progress, "symbols", len(filesProcessed), len(docs), filePath)
 	}
 
-	// Step 2: Wire invocation edges from call graph
-	callEdges, callErr := symbolStore.GetCallEdges(ctx)
-	if callErr == nil {
-		emitBuildProgress(progress, "calls", 0, len(callEdges), "wiring invocation edges")
-		// Build symbol-by-name index for fast callee resolution
-		symbolByName := make(map[string][]*Node)
-		for _, n := range graph.GetNodesByKind(KindSymbol) {
-			symbolByName[n.SymbolName] = append(symbolByName[n.SymbolName], n)
-		}
-
-		for i, ce := range callEdges {
-			callerID := findSymbolNodeID(graph, ce.Caller, ce.File, ce.Line)
-			// For callee, look up in symbol index
-			calleeNodes := symbolByName[ce.Callee]
-			var bestMatch *Node
-			var samePackageMatch *Node
-			for _, cn := range calleeNodes {
-				// Priority 1: same-file match (break immediately)
-				if cn.Path == ce.File {
-					bestMatch = cn
-					break
-				}
-				// Priority 2: same-package match
-				if samePackageMatch == nil && filepath.Dir(cn.Path) == filepath.Dir(ce.File) {
-					samePackageMatch = cn
-				}
-				// Priority 3: any match (first seen)
-				if bestMatch == nil {
-					bestMatch = cn
-				}
-			}
-			// Prefer same-package over random cross-package match
-			if samePackageMatch != nil && (bestMatch == nil || bestMatch.Path != ce.File) {
-				bestMatch = samePackageMatch
-			}
-			if bestMatch != nil && callerID != "" {
-				graph.AddEdge(&Edge{
-					From:      callerID,
-					To:        bestMatch.ID,
-					Type:      EdgeInvokes,
-					Weight:    1.0,
-					UpdatedAt: time.Now(),
-				})
-			}
-			emitBuildProgress(progress, "calls", i+1, len(callEdges), ce.Caller+" -> "+ce.Callee)
-		}
-	} else {
-		emitBuildProgress(progress, "calls", 1, 1, "call edge extraction unavailable")
+	// Step 2: Wire invocation edges from call graph.
+	if err := idx.wireInvocationEdges(ctx, graph, symbolStore, progress); err != nil {
+		return fmt.Errorf("failed to wire invocation edges: %w", err)
 	}
 
-	// Step 3: Wire import edges by analyzing cross-file invocations.
-	// When a symbol in file A invokes a symbol in file B, file A imports file B.
-	totalImportCandidates := len(graph.Edges)
-	emitBuildProgress(progress, "imports", 0, totalImportCandidates, "wiring import edges")
-	importsSeen := make(map[string]bool) // "fileA->fileB" dedup key
-	for i, e := range graph.Edges {
-		if e.Type != EdgeInvokes {
-			emitBuildProgress(progress, "imports", i+1, totalImportCandidates, "")
-			continue
-		}
-		callerNode := graph.GetNode(e.From)
-		calleeNode := graph.GetNode(e.To)
-		if callerNode == nil || calleeNode == nil {
-			continue
-		}
-		if callerNode.Path == "" || calleeNode.Path == "" || callerNode.Path == calleeNode.Path {
-			continue
-		}
-		key := callerNode.Path + "->" + calleeNode.Path
-		if importsSeen[key] {
-			continue
-		}
-		importsSeen[key] = true
-
-		fromFileID := MakeNodeID(KindFile, callerNode.Path)
-		toFileID := MakeNodeID(KindFile, calleeNode.Path)
-		if graph.GetNode(fromFileID) != nil && graph.GetNode(toFileID) != nil {
-			graph.AddEdge(&Edge{
-				From:      fromFileID,
-				To:        toFileID,
-				Type:      EdgeImports,
-				Weight:    1.0,
-				UpdatedAt: time.Now(),
-			})
-		}
-		emitBuildProgress(progress, "imports", i+1, totalImportCandidates, callerNode.Path+" -> "+calleeNode.Path)
+	// Step 3: Wire import edges derived from invocation edges.
+	if err := idx.wireImportEdges(graph, progress); err != nil {
+		return fmt.Errorf("failed to wire import edges: %w", err)
 	}
 
 	// Step 3b: Wire semantic similarity edges from feature label overlap.
@@ -299,6 +221,27 @@ func (idx *RPGIndexer) HandleFileEvent(ctx context.Context, eventType string, fi
 	default:
 		return fmt.Errorf("unknown event type: %s", eventType)
 	}
+
+	return nil
+}
+
+// RefreshDerivedEdges rebuilds non-hierarchical relationship edges from the
+// latest symbol/call state. This keeps RPG relationships strict during watch
+// mode without a full graph rebuild.
+func (idx *RPGIndexer) RefreshDerivedEdges(ctx context.Context, symbolStore trace.SymbolStore) error {
+	graph := idx.store.GetGraph()
+
+	// Remove derived edges and rebuild them from the latest graph + symbol store.
+	removeEdgesByTypes(graph, EdgeInvokes, EdgeImports, EdgeSemanticSim)
+
+	if err := idx.wireInvocationEdges(ctx, graph, symbolStore, nil); err != nil {
+		return fmt.Errorf("wire invocation edges: %w", err)
+	}
+	if err := idx.wireImportEdges(graph, nil); err != nil {
+		return fmt.Errorf("wire import edges: %w", err)
+	}
+	idx.wireFeatureSimilarity(graph)
+	idx.wireCoCallerAffinity(graph)
 
 	return nil
 }
@@ -415,6 +358,131 @@ func normalizeEndLine(startLine, endLine int) int {
 // overlaps checks if two line ranges overlap.
 func overlaps(start1, end1, start2, end2 int) bool {
 	return start1 <= end2 && start2 <= end1
+}
+
+func removeEdgesByTypes(graph *Graph, edgeTypes ...EdgeType) {
+	if len(edgeTypes) == 0 || len(graph.Edges) == 0 {
+		return
+	}
+
+	typeSet := make(map[EdgeType]bool, len(edgeTypes))
+	for _, t := range edgeTypes {
+		typeSet[t] = true
+	}
+
+	filtered := make([]*Edge, 0, len(graph.Edges))
+	removed := false
+	for _, e := range graph.Edges {
+		if typeSet[e.Type] {
+			removed = true
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+	if !removed {
+		return
+	}
+
+	graph.Edges = filtered
+	graph.RebuildIndexes()
+}
+
+func (idx *RPGIndexer) wireInvocationEdges(ctx context.Context, graph *Graph, symbolStore trace.SymbolStore, progress BuildProgressFunc) error {
+	callEdges, callErr := symbolStore.GetCallEdges(ctx)
+	if callErr != nil {
+		emitBuildProgress(progress, "calls", 1, 1, "call edge extraction unavailable")
+		return nil
+	}
+
+	emitBuildProgress(progress, "calls", 0, len(callEdges), "wiring invocation edges")
+
+	// Build symbol-by-name index for fast callee resolution.
+	symbolByName := make(map[string][]*Node)
+	for _, n := range graph.GetNodesByKind(KindSymbol) {
+		symbolByName[n.SymbolName] = append(symbolByName[n.SymbolName], n)
+	}
+
+	for i, ce := range callEdges {
+		callerID := findSymbolNodeID(graph, ce.Caller, ce.File, ce.Line)
+		calleeNodes := symbolByName[ce.Callee]
+		var bestMatch *Node
+		var samePackageMatch *Node
+		for _, cn := range calleeNodes {
+			// Priority 1: same-file match (break immediately).
+			if cn.Path == ce.File {
+				bestMatch = cn
+				break
+			}
+			// Priority 2: same-package match.
+			if samePackageMatch == nil && filepath.Dir(cn.Path) == filepath.Dir(ce.File) {
+				samePackageMatch = cn
+			}
+			// Priority 3: any match (first seen).
+			if bestMatch == nil {
+				bestMatch = cn
+			}
+		}
+		// Prefer same-package over random cross-package match.
+		if samePackageMatch != nil && (bestMatch == nil || bestMatch.Path != ce.File) {
+			bestMatch = samePackageMatch
+		}
+		if bestMatch != nil && callerID != "" {
+			graph.AddEdge(&Edge{
+				From:      callerID,
+				To:        bestMatch.ID,
+				Type:      EdgeInvokes,
+				Weight:    1.0,
+				UpdatedAt: time.Now(),
+			})
+		}
+		emitBuildProgress(progress, "calls", i+1, len(callEdges), ce.Caller+" -> "+ce.Callee)
+	}
+
+	return nil
+}
+
+func (idx *RPGIndexer) wireImportEdges(graph *Graph, progress BuildProgressFunc) error {
+	// When a symbol in file A invokes a symbol in file B, file A imports file B.
+	totalImportCandidates := len(graph.Edges)
+	emitBuildProgress(progress, "imports", 0, totalImportCandidates, "wiring import edges")
+
+	importsSeen := make(map[string]bool) // "fileA->fileB" dedup key
+	for i, e := range graph.Edges {
+		if e.Type != EdgeInvokes {
+			emitBuildProgress(progress, "imports", i+1, totalImportCandidates, "")
+			continue
+		}
+
+		callerNode := graph.GetNode(e.From)
+		calleeNode := graph.GetNode(e.To)
+		if callerNode == nil || calleeNode == nil {
+			continue
+		}
+		if callerNode.Path == "" || calleeNode.Path == "" || callerNode.Path == calleeNode.Path {
+			continue
+		}
+
+		key := callerNode.Path + "->" + calleeNode.Path
+		if importsSeen[key] {
+			continue
+		}
+		importsSeen[key] = true
+
+		fromFileID := MakeNodeID(KindFile, callerNode.Path)
+		toFileID := MakeNodeID(KindFile, calleeNode.Path)
+		if graph.GetNode(fromFileID) != nil && graph.GetNode(toFileID) != nil {
+			graph.AddEdge(&Edge{
+				From:      fromFileID,
+				To:        toFileID,
+				Type:      EdgeImports,
+				Weight:    1.0,
+				UpdatedAt: time.Now(),
+			})
+		}
+		emitBuildProgress(progress, "imports", i+1, totalImportCandidates, callerNode.Path+" -> "+calleeNode.Path)
+	}
+
+	return nil
 }
 
 // capGroup splits or samples a verb group that exceeds maxFeatureGroupSize.

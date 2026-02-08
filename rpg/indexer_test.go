@@ -423,6 +423,147 @@ func TestWireCoCallerAffinity(t *testing.T) {
 	}
 }
 
+func TestRefreshDerivedEdges_RebuildsInvokesAndImports(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	g := NewGraph()
+	fileA := &Node{ID: "file:a.go", Kind: KindFile, Path: "a.go"}
+	fileB := &Node{ID: "file:b.go", Kind: KindFile, Path: "b.go"}
+	symA := &Node{
+		ID:         "sym:a.go:FuncA",
+		Kind:       KindSymbol,
+		Path:       "a.go",
+		Feature:    "operate-func-a",
+		SymbolName: "FuncA",
+		StartLine:  1,
+		EndLine:    10,
+	}
+	symB := &Node{
+		ID:         "sym:b.go:FuncB",
+		Kind:       KindSymbol,
+		Path:       "b.go",
+		Feature:    "operate-func-b",
+		SymbolName: "FuncB",
+		StartLine:  1,
+		EndLine:    10,
+	}
+	g.AddNode(fileA)
+	g.AddNode(fileB)
+	g.AddNode(symA)
+	g.AddNode(symB)
+	g.AddEdge(&Edge{From: fileA.ID, To: symA.ID, Type: EdgeContains, Weight: 1.0})
+	g.AddEdge(&Edge{From: fileB.ID, To: symB.ID, Type: EdgeContains, Weight: 1.0})
+
+	// Seed stale derived edges that should be rebuilt.
+	g.AddEdge(&Edge{From: symA.ID, To: symA.ID, Type: EdgeInvokes, Weight: 1.0})
+	g.AddEdge(&Edge{From: fileB.ID, To: fileA.ID, Type: EdgeImports, Weight: 1.0})
+
+	symbolStore := trace.NewGOBSymbolStore(filepath.Join(tmpDir, "symbols.gob"))
+	if err := symbolStore.SaveFile(ctx, "a.go", []trace.Symbol{
+		{
+			Name:     "FuncA",
+			Kind:     trace.KindFunction,
+			File:     "a.go",
+			Line:     1,
+			EndLine:  10,
+			Language: "go",
+		},
+	}, []trace.Reference{
+		{
+			SymbolName: "FuncB",
+			File:       "a.go",
+			Line:       2,
+			CallerName: "FuncA",
+		},
+	}); err != nil {
+		t.Fatalf("SaveFile(a.go) failed: %v", err)
+	}
+	if err := symbolStore.SaveFile(ctx, "b.go", []trace.Symbol{
+		{
+			Name:     "FuncB",
+			Kind:     trace.KindFunction,
+			File:     "b.go",
+			Line:     1,
+			EndLine:  10,
+			Language: "go",
+		},
+	}, nil); err != nil {
+		t.Fatalf("SaveFile(b.go) failed: %v", err)
+	}
+
+	rpgStore := &GOBRPGStore{indexPath: filepath.Join(tmpDir, "rpg.gob"), graph: g}
+	indexer := NewRPGIndexer(rpgStore, NewLocalExtractor(), tmpDir, RPGIndexerConfig{DriftThreshold: 0.35})
+
+	if err := indexer.RefreshDerivedEdges(ctx, symbolStore); err != nil {
+		t.Fatalf("RefreshDerivedEdges failed: %v", err)
+	}
+
+	var invokes []*Edge
+	var imports []*Edge
+	for _, e := range g.Edges {
+		if e.Type == EdgeInvokes {
+			invokes = append(invokes, e)
+		}
+		if e.Type == EdgeImports {
+			imports = append(imports, e)
+		}
+	}
+
+	if len(invokes) != 1 {
+		t.Fatalf("expected 1 invoke edge after refresh, got %d", len(invokes))
+	}
+	if invokes[0].From != symA.ID || invokes[0].To != symB.ID {
+		t.Fatalf("unexpected invoke edge after refresh: %s -> %s", invokes[0].From, invokes[0].To)
+	}
+	if len(imports) != 1 {
+		t.Fatalf("expected 1 import edge after refresh, got %d", len(imports))
+	}
+	if imports[0].From != fileA.ID || imports[0].To != fileB.ID {
+		t.Fatalf("unexpected import edge after refresh: %s -> %s", imports[0].From, imports[0].To)
+	}
+}
+
+func TestRefreshDerivedEdges_RebuildsSemanticSimilarity(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	g := NewGraph()
+	symA := &Node{ID: "sym:a.go:HandleReq", Kind: KindSymbol, Path: "a.go", Feature: "handle-request@server", SymbolName: "HandleReq"}
+	symB := &Node{ID: "sym:b.go:HandleRes", Kind: KindSymbol, Path: "b.go", Feature: "handle-request@client", SymbolName: "HandleRes"}
+	symC := &Node{ID: "sym:c.go:ParseCfg", Kind: KindSymbol, Path: "c.go", Feature: "parse-config", SymbolName: "ParseCfg"}
+	g.AddNode(symA)
+	g.AddNode(symB)
+	g.AddNode(symC)
+
+	// Seed stale semantic edge that should be dropped.
+	g.AddEdge(&Edge{From: symC.ID, To: symA.ID, Type: EdgeSemanticSim, Weight: 0.9})
+
+	symbolStore := trace.NewGOBSymbolStore(filepath.Join(tmpDir, "symbols.gob"))
+	rpgStore := &GOBRPGStore{indexPath: filepath.Join(tmpDir, "rpg.gob"), graph: g}
+	indexer := NewRPGIndexer(rpgStore, NewLocalExtractor(), tmpDir, RPGIndexerConfig{DriftThreshold: 0.35})
+
+	if err := indexer.RefreshDerivedEdges(ctx, symbolStore); err != nil {
+		t.Fatalf("RefreshDerivedEdges failed: %v", err)
+	}
+
+	semanticEdges := make([]*Edge, 0)
+	for _, e := range g.Edges {
+		if e.Type == EdgeSemanticSim {
+			semanticEdges = append(semanticEdges, e)
+		}
+	}
+	if len(semanticEdges) != 1 {
+		t.Fatalf("expected 1 semantic edge after refresh, got %d", len(semanticEdges))
+	}
+
+	e := semanticEdges[0]
+	validPair := (e.From == symA.ID && e.To == symB.ID) || (e.From == symB.ID && e.To == symA.ID)
+	if !validPair {
+		t.Fatalf("semantic edge does not connect expected nodes: %s -> %s", e.From, e.To)
+	}
+}
+
 func TestBuildFull_EdgeImports(t *testing.T) {
 	// Test that EdgeImports edges are created for cross-file invocations
 	g := NewGraph()

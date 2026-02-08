@@ -1174,6 +1174,11 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 						log.Printf("Warning: failed to update RPG for %s: %v", event.Path, err)
 					} else {
 						log.Printf("RPG updated for %s (%s)", event.Path, eventType)
+						if err := rpgIndexer.RefreshDerivedEdges(ctx, symbolStore); err != nil {
+							log.Printf("Warning: failed to refresh RPG derived edges for %s: %v", event.Path, err)
+						} else {
+							log.Printf("RPG derived edges refreshed after %s (%s)", event.Path, eventType)
+						}
 					}
 					if vectorStore != nil {
 						chunks, err := vectorStore.GetChunksForFile(ctx, fileInfo.Path)
@@ -1203,6 +1208,11 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 				log.Printf("Warning: failed to update RPG for deleted %s: %v", event.Path, err)
 			} else {
 				log.Printf("RPG updated for deleted %s", event.Path)
+				if err := rpgIndexer.RefreshDerivedEdges(ctx, symbolStore); err != nil {
+					log.Printf("Warning: failed to refresh RPG derived edges after delete %s: %v", event.Path, err)
+				} else {
+					log.Printf("RPG derived edges refreshed after delete %s", event.Path)
+				}
 			}
 		}
 		log.Printf("Removed %s from index", event.Path)
