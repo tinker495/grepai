@@ -454,7 +454,7 @@ func runWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.
 			}
 
 		case event := <-w.Events():
-			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, projectRoot, cfg, &lastConfigWrite, event)
+			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, nil, nil, tracedLanguages, projectRoot, cfg, &lastConfigWrite, event)
 		}
 	}
 }
