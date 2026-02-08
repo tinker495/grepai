@@ -39,9 +39,12 @@ The watcher will:
 - Perform an initial scan comparing disk state with existing index
 - Skip unchanged files by comparing modification times (ModTime) for faster subsequent launches
 - Index modified and new files
+- Build/update symbol index for trace queries
+- Build/update RPG graph when enabled
 - Monitor filesystem events (create, modify, delete, rename)
 - Apply debouncing (500ms) to batch rapid changes
 - Handle atomic updates to avoid duplicate vectors
+- Show real-time progress for initial indexing/embedding/RPG graph build in foreground mode
 
 Background mode:
   grepai watch --background              Run in background with default log directory
@@ -591,9 +594,9 @@ func runWatchForeground() error {
 		})
 
 		if !isBackgroundChild {
-			fmt.Println("RPG graph enabled")
+			fmt.Printf("RPG graph: enabled (mode=%s)\n", cfg.RPG.FeatureMode)
 		} else {
-			log.Println("RPG graph enabled")
+			log.Printf("RPG graph enabled (mode=%s)", cfg.RPG.FeatureMode)
 		}
 	}
 
@@ -623,19 +626,31 @@ func runWatchForeground() error {
 
 	// Build RPG graph if enabled
 	if rpgIndexer != nil {
+		start := time.Now()
 		if !isBackgroundChild {
 			fmt.Println("Building RPG graph...")
 		} else {
 			log.Println("Building RPG graph...")
 		}
-		if err := rpgIndexer.BuildFull(ctx, symbolStore, st); err != nil {
+		err := rpgIndexer.BuildFullWithProgress(ctx, symbolStore, st, func(progress rpg.BuildProgress) {
+			if isBackgroundChild {
+				return
+			}
+			printRPGProgress(progress)
+		})
+		if !isBackgroundChild {
+			clearProgressLine()
+		}
+		if err != nil {
 			log.Printf("Warning: failed to build RPG graph: %v", err)
 		} else {
 			rpgStats := rpgStore.GetGraph().Stats()
 			if !isBackgroundChild {
-				fmt.Printf("RPG graph built: %d nodes, %d edges\n", rpgStats.TotalNodes, rpgStats.TotalEdges)
+				fmt.Printf("RPG graph built: %d nodes, %d edges (took %s)\n",
+					rpgStats.TotalNodes, rpgStats.TotalEdges, time.Since(start).Round(time.Millisecond))
 			} else {
-				log.Printf("RPG graph built: %d nodes, %d edges", rpgStats.TotalNodes, rpgStats.TotalEdges)
+				log.Printf("RPG graph built: %d nodes, %d edges (took %s)",
+					rpgStats.TotalNodes, rpgStats.TotalEdges, time.Since(start).Round(time.Millisecond))
 			}
 		}
 	}
@@ -723,12 +738,16 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 					}
 					if err := rpgIndexer.HandleFileEvent(ctx, eventType, fileInfo.Path, symbols); err != nil {
 						log.Printf("Warning: failed to update RPG for %s: %v", event.Path, err)
+					} else {
+						log.Printf("RPG updated for %s (%s)", event.Path, eventType)
 					}
 					// Update EdgeMapsToChunk edges
 					if vectorStore != nil {
 						if chunks, err := vectorStore.GetChunksForFile(ctx, fileInfo.Path); err == nil {
 							if err := rpgIndexer.LinkChunksForFile(ctx, fileInfo.Path, chunks); err != nil {
 								log.Printf("Warning: failed to link RPG chunks for %s: %v", event.Path, err)
+							} else {
+								log.Printf("RPG chunk links updated for %s (%d chunks)", event.Path, len(chunks))
 							}
 						}
 					}
@@ -749,6 +768,8 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 		if rpgIndexer != nil {
 			if err := rpgIndexer.HandleFileEvent(ctx, "delete", event.Path, nil); err != nil {
 				log.Printf("Warning: failed to update RPG for deleted %s: %v", event.Path, err)
+			} else {
+				log.Printf("RPG updated for deleted %s", event.Path)
 			}
 		}
 		log.Printf("Removed %s from index", event.Path)
@@ -763,6 +784,43 @@ func isTracedLanguage(ext string, enabledLanguages []string) bool {
 		}
 	}
 	return false
+}
+
+func clearProgressLine() {
+	fmt.Printf("\r%s\r", strings.Repeat(" ", 120))
+}
+
+func rpgProgressBar(current, total, width int) string {
+	if total <= 0 || width <= 0 {
+		return strings.Repeat("░", width)
+	}
+	if current < 0 {
+		current = 0
+	}
+	if current > total {
+		current = total
+	}
+	filled := int(float64(width) * float64(current) / float64(total))
+	return strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+}
+
+func printRPGProgress(progress rpg.BuildProgress) {
+	label := strings.ToUpper(progress.Stage)
+	if progress.Total > 0 {
+		percent := float64(progress.Current) / float64(progress.Total) * 100
+		bar := rpgProgressBar(progress.Current, progress.Total, 20)
+		if progress.Message != "" {
+			fmt.Printf("\rRPG %-9s [%s] %3.0f%% (%d/%d) %s", label, bar, percent, progress.Current, progress.Total, progress.Message)
+		} else {
+			fmt.Printf("\rRPG %-9s [%s] %3.0f%% (%d/%d)", label, bar, percent, progress.Current, progress.Total)
+		}
+		return
+	}
+	if progress.Message != "" {
+		fmt.Printf("\rRPG %-9s %s", label, progress.Message)
+		return
+	}
+	fmt.Printf("\rRPG %-9s", label)
 }
 
 // printProgress displays a progress bar for indexing

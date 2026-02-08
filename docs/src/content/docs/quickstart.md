@@ -25,9 +25,10 @@ This will:
 2. Split files into chunks
 3. Generate embeddings for each chunk
 4. Store vectors in the local index
-5. Watch for file changes and update the index in real-time
+5. Build symbol/RPG metadata (when enabled)
+6. Watch for file changes and update the index in real-time
 
-You'll see a progress bar during the initial indexing.
+You'll see real-time progress bars during initial indexing/embedding, and RPG build progress when RPG is enabled.
 
 ## 3. Search Your Code
 
