@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-02-08
+
+### Added
+
+- **Multi-Worktree Watch and Daemon Support**: Worktree-aware daemon PID management and multi-worktree parallel watching via errgroup (#115) - @tinker495
+  - Worktree-specific PID/ready/log files in daemon package
+  - `discoverWorktreesForWatch()` for automatic linked worktree detection with auto-init
+  - `watchProject()` extracted for single-project watch loop
+  - Platform-specific liveness detection (pipe on Unix, poll on Windows)
+
+### Fixed
+
+- **Lock File Handle Leak**: Fix file handle leak in `WriteWorktreePIDFile` (defer close after lock) (#115) - @tinker495
+- **Deduplicate Watch Loop**: Remove duplicated no-worktree path to use `watchProject()` instead of inline copy (#115) - @tinker495
+
 ## [0.29.0] - 2026-02-08
 
 ### Added
@@ -519,7 +534,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial public release
 
-[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/yoanbernabeu/grepai/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/yoanbernabeu/grepai/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/yoanbernabeu/grepai/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/yoanbernabeu/grepai/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/yoanbernabeu/grepai/compare/v0.26.0...v0.27.0
