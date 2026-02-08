@@ -10,6 +10,7 @@ import (
 	"github.com/alpkeskin/gotoon"
 	"github.com/spf13/cobra"
 	"github.com/yoanbernabeu/grepai/config"
+	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/trace"
 )
 
@@ -71,6 +72,29 @@ Examples:
 	RunE: runTraceGraph,
 }
 
+var (
+	tracePathEdgeTypes string
+	tracePathDirection string
+	tracePathMetric    string
+	tracePathExplain   bool
+)
+
+var tracePathCmd = &cobra.Command{
+	Use:   "path <source_id> <target_id>",
+	Short: "Find shortest path between two RPG nodes",
+	Long: `Find the shortest path between two RPG nodes using Dijkstra's algorithm.
+Node IDs follow the RPG naming convention:
+  sym:<path>:<name>    - symbol nodes
+  file:<path>          - file nodes
+  area:<name>          - area nodes
+
+Examples:
+  grepai trace path "sym:search/search.go:Search" "sym:embedder/embedder.go:Embed" --json
+  grepai trace path "file:cli/watch.go" "file:rpg/model.go" --edge-types invokes,imports`,
+	Args: cobra.ExactArgs(2),
+	RunE: runTracePath,
+}
+
 func init() {
 	// Add flags to all trace subcommands
 	for _, cmd := range []*cobra.Command{traceCallersCmd, traceCalleesCmd, traceGraphCmd} {
@@ -81,9 +105,19 @@ func init() {
 	}
 	traceGraphCmd.Flags().IntVarP(&traceDepth, "depth", "d", 2, "Maximum depth for graph traversal")
 
+	// trace path flags
+	tracePathCmd.Flags().BoolVar(&traceJSON, "json", false, "Output results in JSON format")
+	tracePathCmd.Flags().BoolVarP(&traceTOON, "toon", "t", false, "Output results in TOON format (token-efficient for AI agents)")
+	tracePathCmd.MarkFlagsMutuallyExclusive("json", "toon")
+	tracePathCmd.Flags().StringVar(&tracePathEdgeTypes, "edge-types", "", "Comma-separated edge types to follow: feature_parent,contains,invokes,imports,maps_to_chunk,semantic_sim")
+	tracePathCmd.Flags().StringVar(&tracePathDirection, "direction", "both", "Traversal direction: forward, reverse, or both")
+	tracePathCmd.Flags().StringVar(&tracePathMetric, "metric", "cost", "Distance metric: cost (1/weight) or hops (uniform 1.0)")
+	tracePathCmd.Flags().BoolVar(&tracePathExplain, "explain", false, "Show detailed edge-by-edge breakdown with costs")
+
 	traceCmd.AddCommand(traceCallersCmd)
 	traceCmd.AddCommand(traceCalleesCmd)
 	traceCmd.AddCommand(traceGraphCmd)
+	traceCmd.AddCommand(tracePathCmd)
 
 	rootCmd.AddCommand(traceCmd)
 }
@@ -157,6 +191,12 @@ func runTraceCallers(cmd *cobra.Command, args []string) error {
 				Context: ref.Context,
 			},
 		})
+	}
+
+	// Enrich with RPG feature paths
+	cfg, _ := config.Load(projectRoot)
+	if cfg != nil {
+		enrichTraceWithRPG(projectRoot, cfg, &result)
 	}
 
 	if traceJSON {
@@ -238,6 +278,12 @@ func runTraceCallees(cmd *cobra.Command, args []string) error {
 		})
 	}
 
+	// Enrich with RPG feature paths
+	cfg, _ := config.Load(projectRoot)
+	if cfg != nil {
+		enrichTraceWithRPG(projectRoot, cfg, &result)
+	}
+
 	if traceJSON {
 		return outputJSON(result)
 	}
@@ -280,6 +326,12 @@ func runTraceGraph(cmd *cobra.Command, args []string) error {
 		Graph: graph,
 	}
 
+	// Enrich with RPG feature paths
+	cfg, _ := config.Load(projectRoot)
+	if cfg != nil {
+		enrichTraceWithRPG(projectRoot, cfg, &result)
+	}
+
 	if traceJSON {
 		return outputJSON(result)
 	}
@@ -288,6 +340,297 @@ func runTraceGraph(cmd *cobra.Command, args []string) error {
 	}
 
 	return displayGraphResult(result)
+}
+
+func runTracePath(cmd *cobra.Command, args []string) error {
+	sourceID := args[0]
+	targetID := args[1]
+	ctx := context.Background()
+
+	projectRoot, err := config.FindProjectRoot()
+	if err != nil {
+		return err
+	}
+
+	cfg, err := config.Load(projectRoot)
+	if err != nil {
+		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	if !cfg.RPG.Enabled {
+		return fmt.Errorf("RPG is not enabled. Enable it in .grepai/config.yaml (rpg.enabled: true) and run 'grepai watch'")
+	}
+
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		return fmt.Errorf("failed to load RPG index: %w. Run 'grepai watch' first", err)
+	}
+	defer rpgStore.Close()
+
+	graph := rpgStore.GetGraph()
+	if graph.Stats().TotalNodes == 0 {
+		return fmt.Errorf("RPG index is empty. Run 'grepai watch' first to build the index")
+	}
+
+	// Parse edge types
+	var edgeTypes []rpg.EdgeType
+	if tracePathEdgeTypes != "" {
+		for _, et := range strings.Split(tracePathEdgeTypes, ",") {
+			et = strings.TrimSpace(et)
+			switch et {
+			case "feature_parent":
+				edgeTypes = append(edgeTypes, rpg.EdgeFeatureParent)
+			case "contains":
+				edgeTypes = append(edgeTypes, rpg.EdgeContains)
+			case "invokes":
+				edgeTypes = append(edgeTypes, rpg.EdgeInvokes)
+			case "imports":
+				edgeTypes = append(edgeTypes, rpg.EdgeImports)
+			case "maps_to_chunk":
+				edgeTypes = append(edgeTypes, rpg.EdgeMapsToChunk)
+			case "semantic_sim":
+				edgeTypes = append(edgeTypes, rpg.EdgeSemanticSim)
+			default:
+				return fmt.Errorf("invalid edge type: %s", et)
+			}
+		}
+	}
+
+	// Validate direction
+	direction := rpg.DijkstraDirection(tracePathDirection)
+	switch direction {
+	case rpg.DirForward, rpg.DirReverse, rpg.DirBoth, "":
+	default:
+		return fmt.Errorf("invalid direction: %s (must be forward, reverse, or both)", tracePathDirection)
+	}
+
+	// Validate metric
+	metric := rpg.DistanceMetric(tracePathMetric)
+	switch metric {
+	case rpg.MetricCost, rpg.MetricHops, "":
+	default:
+		return fmt.Errorf("invalid metric: %s (must be cost or hops)", tracePathMetric)
+	}
+
+	qe := rpg.NewQueryEngine(graph)
+	result, err := qe.ShortestPath(ctx, rpg.ShortestPathRequest{
+		SourceID:  sourceID,
+		TargetID:  targetID,
+		EdgeTypes: edgeTypes,
+		Direction: direction,
+		Metric:    metric,
+	})
+	if err != nil {
+		return fmt.Errorf("shortest path computation failed: %w", err)
+	}
+
+	if traceJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(result)
+	}
+	if traceTOON {
+		output, err := gotoon.Encode(result)
+		if err != nil {
+			return fmt.Errorf("failed to encode TOON: %w", err)
+		}
+		fmt.Println(output)
+		return nil
+	}
+
+	if tracePathExplain {
+		return displayPathResultExplain(result)
+	}
+	return displayPathResult(result)
+}
+
+func displayPathResult(result *rpg.ShortestPathResult) error {
+	if result.Distance < 0 {
+		src := "<unknown>"
+		tgt := "<unknown>"
+		if result.Source != nil {
+			src = result.Source.ID
+		}
+		if result.Target != nil {
+			tgt = result.Target.ID
+		}
+		fmt.Printf("No path found from %s to %s\n", src, tgt)
+		return nil
+	}
+
+	fmt.Printf("Shortest Path: %s -> %s\n", result.Source.ID, result.Target.ID)
+	fmt.Printf("Total Distance: %.4f (%d hops)\n", result.Distance, len(result.Edges))
+	fmt.Println(strings.Repeat("-", 60))
+
+	for i, step := range result.Steps {
+		nodeLabel := step.Node.ID
+		if step.Node.SymbolName != "" {
+			nodeLabel = fmt.Sprintf("%s (%s)", step.Node.ID, step.Node.SymbolName)
+		}
+
+		if i == 0 {
+			fmt.Printf("  %s (cost: %.4f)\n", nodeLabel, step.Cost)
+		} else {
+			edgeType := ""
+			if step.Edge != nil {
+				edgeType = string(step.Edge.Type)
+			}
+			fmt.Printf("  -> %s (cost: %.4f, via: %s)\n", nodeLabel, step.Cost, edgeType)
+		}
+	}
+
+	return nil
+}
+
+func displayPathResultExplain(result *rpg.ShortestPathResult) error {
+	if result.Distance < 0 {
+		src := "<unknown>"
+		tgt := "<unknown>"
+		if result.Source != nil {
+			src = result.Source.ID
+		}
+		if result.Target != nil {
+			tgt = result.Target.ID
+		}
+		fmt.Printf("No path found from %s to %s\n", src, tgt)
+		return nil
+	}
+
+	fmt.Printf("Shortest Path: %s -> %s\n", result.Source.ID, result.Target.ID)
+	fmt.Printf("Total Distance: %.4f (%d hops)\n", result.Distance, len(result.Edges))
+	fmt.Println(strings.Repeat("=", 70))
+
+	// Edge type distribution
+	edgeTypeCounts := make(map[rpg.EdgeType]int)
+	var maxEdgeCost float64
+	var bottleneckEdge *rpg.Edge
+	for _, e := range result.Edges {
+		edgeTypeCounts[e.Type]++
+		var c float64
+		if e.Weight <= 0 {
+			c = 10.0
+		} else {
+			c = 1.0 / e.Weight
+		}
+		if c > maxEdgeCost {
+			maxEdgeCost = c
+			bottleneckEdge = e
+		}
+	}
+
+	fmt.Println("\nSummary:")
+	fmt.Printf("  Hops: %d\n", len(result.Edges))
+	fmt.Printf("  Edge types: ")
+	first := true
+	for et, count := range edgeTypeCounts {
+		if !first {
+			fmt.Print(", ")
+		}
+		fmt.Printf("%s=%d", et, count)
+		first = false
+	}
+	fmt.Println()
+	if bottleneckEdge != nil {
+		fmt.Printf("  Bottleneck: %s -> %s (type: %s, weight: %.4f, cost: %.4f)\n",
+			bottleneckEdge.From, bottleneckEdge.To, bottleneckEdge.Type,
+			bottleneckEdge.Weight, maxEdgeCost)
+	}
+
+	fmt.Println("\nStep-by-step:")
+	fmt.Println(strings.Repeat("-", 70))
+
+	for i, step := range result.Steps {
+		nodeLabel := step.Node.ID
+		if step.Node.SymbolName != "" {
+			nodeLabel = fmt.Sprintf("%s (%s)", step.Node.ID, step.Node.SymbolName)
+		}
+
+		if i == 0 {
+			fmt.Printf("  [START] %s\n", nodeLabel)
+			fmt.Printf("          cumulative cost: %.4f\n", step.Cost)
+		} else {
+			edgeType := ""
+			edgeWeight := 0.0
+			edgeCostVal := 0.0
+			direction := "forward"
+			if step.Edge != nil {
+				edgeType = string(step.Edge.Type)
+				edgeWeight = step.Edge.Weight
+				if edgeWeight <= 0 {
+					edgeCostVal = 10.0
+				} else {
+					edgeCostVal = 1.0 / edgeWeight
+				}
+				// Determine traversal direction
+				if step.Edge.From != result.Steps[i-1].Node.ID {
+					direction = "reverse"
+				}
+			}
+			fmt.Printf("    |  edge: %s (weight: %.4f, cost: %.4f, dir: %s)\n",
+				edgeType, edgeWeight, edgeCostVal, direction)
+			fmt.Printf("    v\n")
+			fmt.Printf("  [%d] %s\n", i, nodeLabel)
+			fmt.Printf("      cumulative cost: %.4f\n", step.Cost)
+		}
+	}
+
+	return nil
+}
+
+// enrichTraceWithRPG enriches all symbols in a TraceResult with RPG feature paths.
+func enrichTraceWithRPG(projectRoot string, cfg *config.Config, result *trace.TraceResult) {
+	if !cfg.RPG.Enabled {
+		return
+	}
+
+	ctx := context.Background()
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		return // best-effort
+	}
+	defer rpgStore.Close()
+
+	graph := rpgStore.GetGraph()
+	qe := rpg.NewQueryEngine(graph)
+
+	lookupFeaturePath := func(sym *trace.Symbol) {
+		if sym == nil || sym.File == "" {
+			return
+		}
+		nodes := graph.GetNodesByFile(sym.File)
+		for _, n := range nodes {
+			if n.Kind == rpg.KindSymbol && n.SymbolName == sym.Name {
+				fetchResult, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
+				if err == nil && fetchResult != nil {
+					sym.FeaturePath = fetchResult.FeaturePath
+				}
+				return
+			}
+		}
+	}
+
+	// Enrich the main symbol
+	if result.Symbol != nil {
+		lookupFeaturePath(result.Symbol)
+	}
+
+	// Enrich callers
+	for i := range result.Callers {
+		lookupFeaturePath(&result.Callers[i].Symbol)
+	}
+
+	// Enrich callees
+	for i := range result.Callees {
+		lookupFeaturePath(&result.Callees[i].Symbol)
+	}
+
+	// Enrich graph nodes
+	if result.Graph != nil {
+		for name, sym := range result.Graph.Nodes {
+			lookupFeaturePath(&sym)
+			result.Graph.Nodes[name] = sym
+		}
+	}
 }
 
 func outputJSON(result trace.TraceResult) error {
@@ -308,6 +651,9 @@ func outputTOON(result trace.TraceResult) error {
 func displayCallersResult(result trace.TraceResult) error {
 	fmt.Printf("Symbol: %s (%s)\n", result.Symbol.Name, result.Symbol.Kind)
 	fmt.Printf("File: %s:%d\n", result.Symbol.File, result.Symbol.Line)
+	if result.Symbol.FeaturePath != "" {
+		fmt.Printf("Feature: %s\n", result.Symbol.FeaturePath)
+	}
 	fmt.Printf("\nCallers (%d):\n", len(result.Callers))
 	fmt.Println(strings.Repeat("-", 60))
 
@@ -321,6 +667,9 @@ func displayCallersResult(result trace.TraceResult) error {
 		if caller.Symbol.File != "" {
 			fmt.Printf("   Defined: %s:%d\n", caller.Symbol.File, caller.Symbol.Line)
 		}
+		if caller.Symbol.FeaturePath != "" {
+			fmt.Printf("   Feature: %s\n", caller.Symbol.FeaturePath)
+		}
 		fmt.Printf("   Calls at: %s:%d\n", caller.CallSite.File, caller.CallSite.Line)
 		if caller.CallSite.Context != "" {
 			fmt.Printf("   Context: %s\n", truncate(caller.CallSite.Context, 80))
@@ -333,6 +682,9 @@ func displayCallersResult(result trace.TraceResult) error {
 func displayCalleesResult(result trace.TraceResult) error {
 	fmt.Printf("Symbol: %s (%s)\n", result.Symbol.Name, result.Symbol.Kind)
 	fmt.Printf("File: %s:%d\n", result.Symbol.File, result.Symbol.Line)
+	if result.Symbol.FeaturePath != "" {
+		fmt.Printf("Feature: %s\n", result.Symbol.FeaturePath)
+	}
 	fmt.Printf("\nCallees (%d):\n", len(result.Callees))
 	fmt.Println(strings.Repeat("-", 60))
 
@@ -346,6 +698,9 @@ func displayCalleesResult(result trace.TraceResult) error {
 		if callee.Symbol.File != "" {
 			fmt.Printf("   Defined: %s:%d\n", callee.Symbol.File, callee.Symbol.Line)
 		}
+		if callee.Symbol.FeaturePath != "" {
+			fmt.Printf("   Feature: %s\n", callee.Symbol.FeaturePath)
+		}
 		fmt.Printf("   Called at: %s:%d\n", callee.CallSite.File, callee.CallSite.Line)
 	}
 
@@ -358,7 +713,11 @@ func displayGraphResult(result trace.TraceResult) error {
 
 	fmt.Printf("\nNodes (%d):\n", len(result.Graph.Nodes))
 	for name, sym := range result.Graph.Nodes {
-		fmt.Printf("  - %s (%s) @ %s:%d\n", name, sym.Kind, sym.File, sym.Line)
+		if sym.FeaturePath != "" {
+			fmt.Printf("  - %s (%s) @ %s:%d [%s]\n", name, sym.Kind, sym.File, sym.Line, sym.FeaturePath)
+		} else {
+			fmt.Printf("  - %s (%s) @ %s:%d\n", name, sym.Kind, sym.File, sym.Line)
+		}
 	}
 
 	fmt.Printf("\nEdges (%d):\n", len(result.Graph.Edges))

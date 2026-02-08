@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 
@@ -10,7 +11,12 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"github.com/yoanbernabeu/grepai/config"
+	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/store"
+)
+
+var (
+	statusCheckRPG bool
 )
 
 var statusCmd = &cobra.Command{
@@ -24,6 +30,10 @@ Navigation:
   Up/Down  - Navigate
   q        - Quit`,
 	RunE: runStatus,
+}
+
+func init() {
+	statusCmd.Flags().BoolVar(&statusCheckRPG, "check-rpg", false, "Validate RPG graph integrity and exit (non-interactive)")
 }
 
 type viewState int
@@ -46,6 +56,8 @@ type model struct {
 	width         int
 	height        int
 	err           error
+	// RPG stats (best-effort, nil if unavailable)
+	rpgStats *rpg.GraphStats
 }
 
 // Styles
@@ -184,6 +196,27 @@ func (m model) viewStats() string {
 
 	sb.WriteString(normalStyle.Render("Provider:         "))
 	sb.WriteString(fmt.Sprintf("%s (%s)\n", m.cfg.Embedder.Provider, m.cfg.Embedder.Model))
+
+	// RPG stats if available
+	if m.rpgStats != nil {
+		sb.WriteString("\n")
+		sb.WriteString(normalStyle.Render("RPG Graph:        "))
+		sb.WriteString(fmt.Sprintf("%d nodes, %d edges\n", m.rpgStats.TotalNodes, m.rpgStats.TotalEdges))
+
+		// Edge type breakdown
+		if len(m.rpgStats.EdgesByType) > 0 {
+			sb.WriteString(normalStyle.Render("  Edge types:     "))
+			first := true
+			for et, count := range m.rpgStats.EdgesByType {
+				if !first {
+					sb.WriteString(", ")
+				}
+				sb.WriteString(fmt.Sprintf("%s: %d", et, count))
+				first = false
+			}
+			sb.WriteString("\n")
+		}
+	}
 
 	sb.WriteString("\n")
 	sb.WriteString(helpStyle.Render("[Enter] Browse files  [q] Quit"))
@@ -360,13 +393,65 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		return files[i].Path < files[j].Path
 	})
 
+	// Best-effort RPG stats
+	var rpgStatsPtr *rpg.GraphStats
+	if cfg.RPG.Enabled {
+		rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
+		if err := rpgStore.Load(ctx); err == nil {
+			stats := rpgStore.GetGraph().Stats()
+			rpgStatsPtr = &stats
+			rpgStore.Close()
+		}
+	}
+
+	// --check-rpg: validate and exit without TUI
+	if statusCheckRPG {
+		if !cfg.RPG.Enabled {
+			fmt.Println("RPG is not enabled")
+			os.Exit(1)
+		}
+		rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
+		if err := rpgStore.Load(ctx); err != nil {
+			fmt.Printf("Failed to load RPG index: %v\n", err)
+			os.Exit(1)
+		}
+		graph := rpgStore.GetGraph()
+		rpgStore.Close()
+
+		graphStats := graph.Stats()
+		fmt.Printf("RPG Graph: %d nodes, %d edges\n", graphStats.TotalNodes, graphStats.TotalEdges)
+		for et, count := range graphStats.EdgesByType {
+			fmt.Printf("  %s: %d\n", et, count)
+		}
+
+		report := graph.Validate()
+		if len(report.DanglingEdges) == 0 && len(report.OrphanNodes) == 0 && report.DuplicateEdges == 0 {
+			fmt.Println("\nValidation: OK")
+			return nil
+		}
+
+		fmt.Println("\nValidation issues:")
+		for _, msg := range report.DanglingEdges {
+			fmt.Printf("  DANGLING: %s\n", msg)
+		}
+		if len(report.OrphanNodes) > 0 {
+			fmt.Printf("  ORPHAN NODES: %d\n", len(report.OrphanNodes))
+		}
+		if report.DuplicateEdges > 0 {
+			fmt.Printf("  DUPLICATE EDGES: %d\n", report.DuplicateEdges)
+		}
+		os.Exit(1)
+		return nil
+	}
+
 	// Create model
 	m := model{
-		st:    st,
-		cfg:   cfg,
-		state: viewStats,
-		stats: stats,
-		files: files,
+		st:       st,
+		cfg:      cfg,
+		state:    viewStats,
+		stats:    stats,
+		files:    files,
+		rpgStats: rpgStatsPtr,
 	}
 
 	// Run TUI

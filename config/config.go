@@ -16,6 +16,14 @@ const (
 	ConfigFileName      = "config.yaml"
 	IndexFileName       = "index.gob"
 	SymbolIndexFileName = "symbols.gob"
+	RPGIndexFileName    = "rpg.gob"
+
+	// RPG default configuration values.
+	DefaultRPGDriftThreshold       = 0.35
+	DefaultRPGMaxTraversalDepth    = 3
+	DefaultRPGLLMTimeoutMs         = 8000
+	DefaultRPGFeatureMode          = "local"
+	DefaultRPGFeatureGroupStrategy = "sample"
 )
 
 type Config struct {
@@ -26,6 +34,7 @@ type Config struct {
 	Watch             WatchConfig    `yaml:"watch"`
 	Search            SearchConfig   `yaml:"search"`
 	Trace             TraceConfig    `yaml:"trace"`
+	RPG               RPGConfig      `yaml:"rpg"`
 	Update            UpdateConfig   `yaml:"update"`
 	Ignore            []string       `yaml:"ignore"`
 	ExternalGitignore string         `yaml:"external_gitignore,omitempty"`
@@ -115,6 +124,43 @@ type TraceConfig struct {
 	ExcludePatterns  []string `yaml:"exclude_patterns"`  // Patterns to exclude
 }
 
+type RPGConfig struct {
+	Enabled              bool    `yaml:"enabled"`
+	StorePath            string  `yaml:"store_path,omitempty"`
+	FeatureMode          string  `yaml:"feature_mode"` // local | hybrid | llm
+	DriftThreshold       float64 `yaml:"drift_threshold"`
+	MaxTraversalDepth    int     `yaml:"max_traversal_depth"`
+	LLMProvider          string  `yaml:"llm_provider,omitempty"`
+	LLMModel             string  `yaml:"llm_model,omitempty"`
+	LLMEndpoint          string  `yaml:"llm_endpoint,omitempty"`
+	LLMAPIKey            string  `yaml:"llm_api_key,omitempty"`
+	LLMTimeoutMs         int     `yaml:"llm_timeout_ms,omitempty"`
+	FeatureGroupStrategy string  `yaml:"feature_group_strategy,omitempty"`
+}
+
+// ValidateRPGConfig checks RPG configuration values for validity.
+func ValidateRPGConfig(cfg RPGConfig) error {
+	if cfg.DriftThreshold < 0.0 || cfg.DriftThreshold > 1.0 {
+		return fmt.Errorf("rpg.drift_threshold must be between 0.0 and 1.0, got %.2f", cfg.DriftThreshold)
+	}
+	if cfg.MaxTraversalDepth < 1 || cfg.MaxTraversalDepth > 10 {
+		return fmt.Errorf("rpg.max_traversal_depth must be between 1 and 10, got %d", cfg.MaxTraversalDepth)
+	}
+	switch cfg.FeatureMode {
+	case "local", "hybrid", "llm":
+		// valid
+	default:
+		return fmt.Errorf("rpg.feature_mode must be one of: local, hybrid, llm; got %q", cfg.FeatureMode)
+	}
+	switch cfg.FeatureGroupStrategy {
+	case "sample", "split":
+		// valid
+	default:
+		return fmt.Errorf("rpg.feature_group_strategy must be one of: sample, split; got %q", cfg.FeatureGroupStrategy)
+	}
+	return nil
+}
+
 func DefaultConfig() *Config {
 	defaultDim := 768
 	return &Config{
@@ -192,6 +238,17 @@ func DefaultConfig() *Config {
 				"__tests__/*",
 			},
 		},
+		RPG: RPGConfig{
+			Enabled:              false,
+			FeatureMode:          DefaultRPGFeatureMode,
+			DriftThreshold:       DefaultRPGDriftThreshold,
+			MaxTraversalDepth:    DefaultRPGMaxTraversalDepth,
+			LLMProvider:          "ollama",
+			LLMModel:             "lfm2.5-thinking",
+			LLMEndpoint:          "http://localhost:11434/v1",
+			LLMTimeoutMs:         DefaultRPGLLMTimeoutMs,
+			FeatureGroupStrategy: DefaultRPGFeatureGroupStrategy,
+		},
 		Update: UpdateConfig{
 			CheckOnStartup: false, // Opt-in by default for privacy
 		},
@@ -231,6 +288,10 @@ func GetSymbolIndexPath(projectRoot string) string {
 	return filepath.Join(GetConfigDir(projectRoot), SymbolIndexFileName)
 }
 
+func GetRPGIndexPath(projectRoot string) string {
+	return filepath.Join(GetConfigDir(projectRoot), RPGIndexFileName)
+}
+
 func Load(projectRoot string) (*Config, error) {
 	configPath := GetConfigPath(projectRoot)
 
@@ -246,6 +307,13 @@ func Load(projectRoot string) (*Config, error) {
 
 	// Apply defaults for missing values (backward compatibility)
 	cfg.applyDefaults()
+
+	// Validate RPG config when enabled
+	if cfg.RPG.Enabled {
+		if err := ValidateRPGConfig(cfg.RPG); err != nil {
+			return nil, fmt.Errorf("invalid RPG configuration: %w", err)
+		}
+	}
 
 	return &cfg, nil
 }
@@ -304,6 +372,32 @@ func (c *Config) applyDefaults() {
 	// Qdrant defaults
 	if c.Store.Backend == "qdrant" && c.Store.Qdrant.Port <= 0 {
 		c.Store.Qdrant.Port = 6334
+	}
+
+	// RPG defaults
+	if c.RPG.FeatureMode == "" {
+		c.RPG.FeatureMode = DefaultRPGFeatureMode
+	}
+	if c.RPG.DriftThreshold < 0 {
+		c.RPG.DriftThreshold = DefaultRPGDriftThreshold
+	}
+	if c.RPG.MaxTraversalDepth <= 0 {
+		c.RPG.MaxTraversalDepth = DefaultRPGMaxTraversalDepth
+	}
+	if c.RPG.LLMProvider == "" {
+		c.RPG.LLMProvider = "ollama"
+	}
+	if c.RPG.LLMModel == "" {
+		c.RPG.LLMModel = "lfm2.5-thinking"
+	}
+	if c.RPG.LLMEndpoint == "" {
+		c.RPG.LLMEndpoint = "http://localhost:11434/v1"
+	}
+	if c.RPG.LLMTimeoutMs <= 0 {
+		c.RPG.LLMTimeoutMs = DefaultRPGLLMTimeoutMs
+	}
+	if c.RPG.FeatureGroupStrategy == "" {
+		c.RPG.FeatureGroupStrategy = DefaultRPGFeatureGroupStrategy
 	}
 }
 

@@ -485,3 +485,39 @@ store:
 		})
 	}
 }
+
+func TestValidateRPGConfig_FeatureGroupStrategy(t *testing.T) {
+	tests := []struct {
+		name     string
+		strategy string
+		wantErr  bool
+	}{
+		{"sample is valid", "sample", false},
+		{"split is valid", "split", false},
+		{"empty is invalid", "", true},
+		{"unknown is invalid", "random", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := RPGConfig{
+				DriftThreshold:       DefaultRPGDriftThreshold,
+				MaxTraversalDepth:    DefaultRPGMaxTraversalDepth,
+				FeatureMode:          DefaultRPGFeatureMode,
+				FeatureGroupStrategy: tt.strategy,
+			}
+			err := ValidateRPGConfig(cfg)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ValidateRPGConfig() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestApplyDefaults_FeatureGroupStrategy(t *testing.T) {
+	// When FeatureGroupStrategy is empty, applyDefaults should set it to "sample"
+	cfg := &Config{}
+	cfg.applyDefaults()
+	if cfg.RPG.FeatureGroupStrategy != DefaultRPGFeatureGroupStrategy {
+		t.Errorf("expected FeatureGroupStrategy=%q, got %q", DefaultRPGFeatureGroupStrategy, cfg.RPG.FeatureGroupStrategy)
+	}
+}

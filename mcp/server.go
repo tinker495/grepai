@@ -6,6 +6,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"math"
+	"sort"
 	"strings"
 
 	"github.com/alpkeskin/gotoon"
@@ -13,6 +16,7 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/search"
 	"github.com/yoanbernabeu/grepai/store"
 	"github.com/yoanbernabeu/grepai/trace"
@@ -27,19 +31,25 @@ type Server struct {
 
 // SearchResult is a lightweight struct for MCP output.
 type SearchResult struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float32 `json:"score"`
-	Content   string  `json:"content"`
+	FilePath    string   `json:"file_path"`
+	StartLine   int      `json:"start_line"`
+	EndLine     int      `json:"end_line"`
+	Score       float32  `json:"score"`
+	Content     string   `json:"content"`
+	FeaturePath string   `json:"feature_path,omitempty"`
+	SymbolName  string   `json:"symbol_name,omitempty"`
+	Distance    *float64 `json:"distance,omitempty"`
 }
 
 // SearchResultCompact is a minimal struct for compact output (no content field).
 type SearchResultCompact struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float32 `json:"score"`
+	FilePath    string   `json:"file_path"`
+	StartLine   int      `json:"start_line"`
+	EndLine     int      `json:"end_line"`
+	Score       float32  `json:"score"`
+	FeaturePath string   `json:"feature_path,omitempty"`
+	SymbolName  string   `json:"symbol_name,omitempty"`
+	Distance    *float64 `json:"distance,omitempty"`
 }
 
 // CallSiteCompact is a minimal struct for compact output (no context field).
@@ -77,6 +87,17 @@ type IndexStatus struct {
 	Provider     string `json:"provider"`
 	Model        string `json:"model"`
 	SymbolsReady bool   `json:"symbols_ready"`
+	RPGEnabled   bool   `json:"rpg_enabled"`
+	RPGNodes     int    `json:"rpg_nodes,omitempty"`
+	RPGEdges     int    `json:"rpg_edges,omitempty"`
+}
+
+// mcpCombinedScore computes score / (1 + alpha * distance).
+func mcpCombinedScore(score float32, distance *float64, alpha float64) float64 {
+	if distance == nil || *distance < 0 {
+		return 0
+	}
+	return float64(score) / (1 + alpha*math.Abs(*distance))
 }
 
 // encodeOutput encodes data in the specified format (json or toon).
@@ -155,6 +176,33 @@ func (s *Server) registerTools() {
 		mcp.WithString("projects",
 			mcp.Description("Comma-separated list of project names to search within workspace (requires workspace)"),
 		),
+		mcp.WithString("distance_from",
+			mcp.Description("RPG node ID to compute distance from each result (requires RPG enabled)"),
+		),
+		mcp.WithString("distance_from_symbol",
+			mcp.Description("Symbol name to resolve to RPG node ID for distance computation"),
+		),
+		mcp.WithString("distance_from_file",
+			mcp.Description("File path to use as RPG node ID for distance computation"),
+		),
+		mcp.WithNumber("distance_max",
+			mcp.Description("Maximum distance to include (0 = no limit)"),
+		),
+		mcp.WithString("distance_direction",
+			mcp.Description("Distance traversal direction: 'forward', 'reverse', or 'both' (default: 'both')"),
+		),
+		mcp.WithString("distance_metric",
+			mcp.Description("Distance metric: 'cost' (1/weight, default) or 'hops' (uniform 1.0)"),
+		),
+		mcp.WithString("distance_edge_types",
+			mcp.Description("Comma-separated edge types for distance: feature_parent, contains, invokes, imports, maps_to_chunk, semantic_sim"),
+		),
+		mcp.WithString("sort",
+			mcp.Description("Sort results by: 'score' (default), 'distance', or 'combined'"),
+		),
+		mcp.WithNumber("distance_weight",
+			mcp.Description("Alpha for combined sort: combined = score / (1 + alpha * distance). Default: 0.0"),
+		),
 	)
 	s.mcpServer.AddTool(searchTool, s.handleSearch)
 
@@ -215,6 +263,92 @@ func (s *Server) registerTools() {
 		),
 	)
 	s.mcpServer.AddTool(indexStatusTool, s.handleIndexStatus)
+
+	// grepai_rpg_search tool
+	rpgSearchTool := mcp.NewTool("grepai_rpg_search",
+		mcp.WithDescription("Search RPG nodes using Jaccard-based semantic matching with scope and kind filtering."),
+		mcp.WithString("query",
+			mcp.Required(),
+			mcp.Description("Natural language or feature query to search for"),
+		),
+		mcp.WithString("scope",
+			mcp.Description("Area/category path to narrow search (e.g., 'cli', 'rpg/query')"),
+		),
+		mcp.WithString("kinds",
+			mcp.Description("Comma-separated node kinds to filter: area, category, subcategory, file, symbol, chunk (default: symbol)"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum number of results to return (default: 10)"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(rpgSearchTool, s.handleRPGSearch)
+
+	// grepai_rpg_fetch tool
+	rpgFetchTool := mcp.NewTool("grepai_rpg_fetch",
+		mcp.WithDescription("Fetch detailed information about a specific RPG node including hierarchy, edges, and context."),
+		mcp.WithString("node_id",
+			mcp.Required(),
+			mcp.Description("Node ID to fetch (e.g., 'sym:main.go:HandleRequest')"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(rpgFetchTool, s.handleRPGFetch)
+
+	// grepai_rpg_explore tool
+	rpgExploreTool := mcp.NewTool("grepai_rpg_explore",
+		mcp.WithDescription("Explore the RPG graph using BFS traversal from a starting node with configurable depth and edge type filtering."),
+		mcp.WithString("start_node_id",
+			mcp.Required(),
+			mcp.Description("Starting node ID for graph traversal"),
+		),
+		mcp.WithString("direction",
+			mcp.Description("Traversal direction: 'forward', 'reverse', or 'both' (default: 'both')"),
+		),
+		mcp.WithNumber("depth",
+			mcp.Description("Maximum BFS depth (default: 2)"),
+		),
+		mcp.WithString("edge_types",
+			mcp.Description("Comma-separated edge types to follow: feature_parent, contains, invokes, imports, maps_to_chunk, semantic_sim"),
+		),
+		mcp.WithNumber("limit",
+			mcp.Description("Maximum nodes to return (default: 100)"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(rpgExploreTool, s.handleRPGExplore)
+
+	// grepai_trace_path tool
+	tracePathTool := mcp.NewTool("grepai_trace_path",
+		mcp.WithDescription("Find shortest path between two RPG nodes using Dijkstra's algorithm. Returns the path, edges, and total distance."),
+		mcp.WithString("source_id",
+			mcp.Required(),
+			mcp.Description("Source RPG node ID (e.g., 'sym:search/search.go:Search', 'file:cli/watch.go')"),
+		),
+		mcp.WithString("target_id",
+			mcp.Required(),
+			mcp.Description("Target RPG node ID"),
+		),
+		mcp.WithString("edge_types",
+			mcp.Description("Comma-separated edge types to follow: feature_parent, contains, invokes, imports, maps_to_chunk, semantic_sim"),
+		),
+		mcp.WithString("direction",
+			mcp.Description("Traversal direction: 'forward', 'reverse', or 'both' (default: 'both')"),
+		),
+		mcp.WithString("metric",
+			mcp.Description("Distance metric: 'cost' (1/weight, default) or 'hops' (uniform 1.0)"),
+		),
+		mcp.WithString("format",
+			mcp.Description("Output format: 'json' (default) or 'toon' (token-efficient)"),
+		),
+	)
+	s.mcpServer.AddTool(tracePathTool, s.handleTracePath)
 }
 
 // handleSearch handles the grepai_search tool call.
@@ -233,10 +367,40 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	format := request.GetString("format", "json")
 	workspace := request.GetString("workspace", "")
 	projects := request.GetString("projects", "")
+	distanceFrom := request.GetString("distance_from", "")
+	distanceFromSymbol := request.GetString("distance_from_symbol", "")
+	distanceFromFile := request.GetString("distance_from_file", "")
+	distanceMax := float64(request.GetInt("distance_max", 0))
+	distanceDirection := request.GetString("distance_direction", "both")
+	distanceMetric := request.GetString("distance_metric", "cost")
+	distanceEdgeTypes := request.GetString("distance_edge_types", "")
+	sortMode := request.GetString("sort", "score")
+	distanceWeight := request.GetFloat("distance_weight", 0.0)
+
+	// Validate mutual exclusivity of distance-from variants
+	distCount := 0
+	if distanceFrom != "" {
+		distCount++
+	}
+	if distanceFromSymbol != "" {
+		distCount++
+	}
+	if distanceFromFile != "" {
+		distCount++
+	}
+	if distCount > 1 {
+		return mcp.NewToolResultError("only one of distance_from, distance_from_symbol, distance_from_file can be specified"), nil
+	}
 
 	// Auto-inject workspace when server is in workspace mode
 	if workspace == "" && s.workspaceName != "" {
 		workspace = s.workspaceName
+	}
+
+	// Validate distance flags with workspace
+	wantDistance := distCount > 0
+	if wantDistance && workspace != "" {
+		return mcp.NewToolResultError("distance parameters are not supported with workspace search (RPG is per-project)"), nil
 	}
 
 	// Validate format
@@ -253,6 +417,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 	cfg, err := config.Load(s.projectRoot)
 	if err != nil {
 		return mcp.NewToolResultError(fmt.Sprintf("failed to load configuration: %v", err)), nil
+	}
+
+	// Validate distance flags require RPG
+	if wantDistance && !cfg.RPG.Enabled {
+		return mcp.NewToolResultError("distance parameters require RPG to be enabled (set rpg.enabled: true in config)"), nil
 	}
 
 	// Initialize embedder
@@ -276,6 +445,152 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 		return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
 	}
 
+	// RPG enrichment
+	type rpgInfo struct {
+		featurePath string
+		symbolName  string
+		distance    *float64
+	}
+	rpgData := make(map[int]rpgInfo)
+	rpgSt, qe, rpgErr := s.tryLoadRPG(ctx)
+	if rpgErr != nil {
+		if wantDistance {
+			return mcp.NewToolResultError(fmt.Sprintf("failed to load RPG for distance computation: %v", rpgErr)), nil
+		}
+		log.Printf("Warning: RPG enrichment unavailable: %v", rpgErr)
+	}
+	if wantDistance && rpgSt == nil {
+		return mcp.NewToolResultError("RPG index is not available for distance computation"), nil
+	}
+	if rpgSt != nil && qe != nil {
+		defer rpgSt.Close()
+		graph := rpgSt.GetGraph()
+
+		// Resolve the distance source node ID
+		resolvedSource := distanceFrom
+		if distanceFromSymbol != "" {
+			matches, resolveErr := qe.ResolveSymbol(distanceFromSymbol)
+			if resolveErr != nil {
+				return mcp.NewToolResultError(resolveErr.Error()), nil
+			}
+			if len(matches) > 1 {
+				var candidates []string
+				for _, m := range matches {
+					candidates = append(candidates, fmt.Sprintf("%s (%s)", m.ID, m.Path))
+				}
+				return mcp.NewToolResultError(fmt.Sprintf("ambiguous symbol %q, %d candidates: %s", distanceFromSymbol, len(matches), strings.Join(candidates, ", "))), nil
+			}
+			resolvedSource = matches[0].ID
+		} else if distanceFromFile != "" {
+			resolvedSource = "file:" + distanceFromFile
+		}
+
+		// Validate source node exists when distance is requested
+		if resolvedSource != "" && graph.GetNode(resolvedSource) == nil {
+			return mcp.NewToolResultError(fmt.Sprintf("distance source node not found in RPG graph: %s", resolvedSource)), nil
+		}
+
+		// Pre-fill distance to -1 for all results when distance is requested
+		if resolvedSource != "" {
+			for i := range results {
+				d := -1.0
+				rpgData[i] = rpgInfo{distance: &d}
+			}
+		}
+
+		// First pass: collect target node IDs and enrich with feature paths
+		targetNodeIDs := make(map[int]string)
+		for i, r := range results {
+			nodes := graph.GetNodesByFile(r.Chunk.FilePath)
+			for _, n := range nodes {
+				if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.EndLine && r.Chunk.StartLine <= n.EndLine {
+					info := rpgData[i]
+					fetchRes, fetchErr := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
+					if fetchErr == nil && fetchRes != nil {
+						info.featurePath = fetchRes.FeaturePath
+						info.symbolName = n.SymbolName
+					}
+					rpgData[i] = info
+					targetNodeIDs[i] = n.ID
+					break
+				}
+			}
+		}
+
+		// Second pass: single DistancesFrom call
+		if resolvedSource != "" {
+			distReq := rpg.DistancesFromRequest{
+				SourceID:  resolvedSource,
+				MaxCost:   distanceMax,
+				Direction: rpg.DijkstraDirection(distanceDirection),
+				Metric:    rpg.DistanceMetric(distanceMetric),
+			}
+			if distanceEdgeTypes != "" {
+				for _, et := range strings.Split(distanceEdgeTypes, ",") {
+					et = strings.TrimSpace(et)
+					if et != "" {
+						distReq.EdgeTypes = append(distReq.EdgeTypes, rpg.EdgeType(et))
+					}
+				}
+			}
+			distResult, distErr := qe.DistancesFrom(ctx, distReq)
+			if distErr == nil && distResult != nil {
+				for i := range results {
+					nid, ok := targetNodeIDs[i]
+					if !ok {
+						continue
+					}
+					info := rpgData[i]
+					if d, found := distResult.Distances[nid]; found {
+						info.distance = &d
+					}
+					rpgData[i] = info
+				}
+			}
+		}
+	}
+
+	// Sort results if requested
+	if sortMode != "" && sortMode != "score" {
+		indices := make([]int, len(results))
+		for i := range indices {
+			indices[i] = i
+		}
+		sort.SliceStable(indices, func(a, b int) bool {
+			switch sortMode {
+			case "distance":
+				da := rpgData[indices[a]].distance
+				db := rpgData[indices[b]].distance
+				if da == nil && db == nil {
+					return false
+				}
+				if da == nil {
+					return false
+				}
+				if db == nil {
+					return true
+				}
+				return *da < *db
+			case "combined":
+				ca := mcpCombinedScore(results[indices[a]].Score, rpgData[indices[a]].distance, distanceWeight)
+				cb := mcpCombinedScore(results[indices[b]].Score, rpgData[indices[b]].distance, distanceWeight)
+				return ca > cb
+			default:
+				return results[indices[a]].Score > results[indices[b]].Score
+			}
+		})
+		sorted := make([]store.SearchResult, len(results))
+		sortedRPG := make(map[int]rpgInfo)
+		for newIdx, oldIdx := range indices {
+			sorted[newIdx] = results[oldIdx]
+			if info, ok := rpgData[oldIdx]; ok {
+				sortedRPG[newIdx] = info
+			}
+		}
+		results = sorted
+		rpgData = sortedRPG
+	}
+
 	var data any
 	if compact {
 		searchResultsCompact := make([]SearchResultCompact, len(results))
@@ -285,6 +600,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 				StartLine: r.Chunk.StartLine,
 				EndLine:   r.Chunk.EndLine,
 				Score:     r.Score,
+			}
+			if info, ok := rpgData[i]; ok {
+				searchResultsCompact[i].FeaturePath = info.featurePath
+				searchResultsCompact[i].SymbolName = info.symbolName
+				searchResultsCompact[i].Distance = info.distance
 			}
 		}
 		data = searchResultsCompact
@@ -297,6 +617,11 @@ func (s *Server) handleSearch(ctx context.Context, request mcp.CallToolRequest) 
 				EndLine:   r.Chunk.EndLine,
 				Score:     r.Score,
 				Content:   r.Chunk.Content,
+			}
+			if info, ok := rpgData[i]; ok {
+				searchResults[i].FeaturePath = info.featurePath
+				searchResults[i].SymbolName = info.symbolName
+				searchResults[i].Distance = info.distance
 			}
 		}
 		data = searchResults
@@ -466,6 +791,43 @@ func (s *Server) createWorkspaceStore(ctx context.Context, ws *config.Workspace)
 	}
 }
 
+// enrichTraceSymbols enriches trace symbols with RPG feature paths.
+// It loads the RPG store once and enriches all provided symbols in one pass.
+func (s *Server) enrichTraceSymbols(ctx context.Context, symbols ...*trace.Symbol) {
+	if s.projectRoot == "" {
+		return
+	}
+	cfg, err := config.Load(s.projectRoot)
+	if err != nil || !cfg.RPG.Enabled {
+		return
+	}
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(s.projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		log.Printf("Warning: RPG enrichment unavailable for trace: %v", err)
+		return
+	}
+	defer rpgStore.Close()
+
+	graph := rpgStore.GetGraph()
+	qe := rpg.NewQueryEngine(graph)
+
+	for _, sym := range symbols {
+		if sym == nil || sym.File == "" {
+			continue
+		}
+		nodes := graph.GetNodesByFile(sym.File)
+		for _, n := range nodes {
+			if n.Kind == rpg.KindSymbol && n.SymbolName == sym.Name {
+				fetchResult, fetchErr := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
+				if fetchErr == nil && fetchResult != nil {
+					sym.FeaturePath = fetchResult.FeaturePath
+				}
+				break
+			}
+		}
+	}
+}
+
 // handleTraceCallers handles the grepai_trace_callers tool call.
 func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	symbolName, err := request.RequireString("symbol")
@@ -548,6 +910,13 @@ func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolReq
 			})
 		}
 
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{resultCompact.Symbol}
+		for i := range resultCompact.Callers {
+			symPtrs = append(symPtrs, &resultCompact.Callers[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
+
 		data = resultCompact
 	} else {
 		result := trace.TraceResult{
@@ -574,6 +943,13 @@ func (s *Server) handleTraceCallers(ctx context.Context, request mcp.CallToolReq
 				},
 			})
 		}
+
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{result.Symbol}
+		for i := range result.Callers {
+			symPtrs = append(symPtrs, &result.Callers[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
 
 		data = result
 	}
@@ -668,6 +1044,13 @@ func (s *Server) handleTraceCallees(ctx context.Context, request mcp.CallToolReq
 			})
 		}
 
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{resultCompact.Symbol}
+		for i := range resultCompact.Callees {
+			symPtrs = append(symPtrs, &resultCompact.Callees[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
+
 		data = resultCompact
 	} else {
 		result := trace.TraceResult{
@@ -693,6 +1076,13 @@ func (s *Server) handleTraceCallees(ctx context.Context, request mcp.CallToolReq
 				},
 			})
 		}
+
+		// Enrich with RPG
+		symPtrs := []*trace.Symbol{result.Symbol}
+		for i := range result.Callees {
+			symPtrs = append(symPtrs, &result.Callees[i].Symbol)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
 
 		data = result
 	}
@@ -751,6 +1141,25 @@ func (s *Server) handleTraceGraph(ctx context.Context, request mcp.CallToolReque
 		Query: symbolName,
 		Mode:  "fast",
 		Graph: graph,
+	}
+
+	// Enrich graph nodes with RPG
+	if result.Graph != nil {
+		// Collect symbols as pointers for enrichment, paired with their map keys
+		type symEntry struct {
+			name string
+			sym  trace.Symbol
+		}
+		entries := make([]symEntry, 0, len(result.Graph.Nodes))
+		symPtrs := make([]*trace.Symbol, 0, len(result.Graph.Nodes))
+		for name, sym := range result.Graph.Nodes {
+			entries = append(entries, symEntry{name: name, sym: sym})
+			symPtrs = append(symPtrs, &entries[len(entries)-1].sym)
+		}
+		s.enrichTraceSymbols(ctx, symPtrs...)
+		for _, e := range entries {
+			result.Graph.Nodes[e.name] = e.sym
+		}
 	}
 
 	output, err := encodeOutput(result, format)
@@ -812,6 +1221,16 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcp.CallToolRequ
 		Provider:     cfg.Embedder.Provider,
 		Model:        cfg.Embedder.Model,
 		SymbolsReady: symbolsReady,
+	}
+
+	// Check RPG status
+	rpgSt, _, _ := s.tryLoadRPG(ctx)
+	if rpgSt != nil {
+		status.RPGEnabled = true
+		rpgStats := rpgSt.GetGraph().Stats()
+		status.RPGNodes = rpgStats.TotalNodes
+		status.RPGEdges = rpgStats.TotalEdges
+		rpgSt.Close()
 	}
 
 	output, err := encodeOutput(status, format)
@@ -902,4 +1321,315 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+}
+
+// tryLoadRPG attempts to load the RPG store. Returns nil values if RPG is disabled or unavailable.
+func (s *Server) tryLoadRPG(ctx context.Context) (rpg.RPGStore, *rpg.QueryEngine, error) {
+	if s.projectRoot == "" {
+		return nil, nil, nil
+	}
+	cfg, err := config.Load(s.projectRoot)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to load config: %w", err)
+	}
+	if !cfg.RPG.Enabled {
+		return nil, nil, nil
+	}
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(s.projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		return nil, nil, fmt.Errorf("failed to load RPG store: %w", err)
+	}
+	graph := rpgStore.GetGraph()
+	if graph.Stats().TotalNodes == 0 {
+		rpgStore.Close()
+		return nil, nil, nil
+	}
+	qe := rpg.NewQueryEngine(graph)
+	return rpgStore, qe, nil
+}
+
+// handleRPGSearch handles the grepai_rpg_search tool call.
+func (s *Server) handleRPGSearch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	query, err := request.RequireString("query")
+	if err != nil {
+		return mcp.NewToolResultError("query parameter is required"), nil
+	}
+
+	scope := request.GetString("scope", "")
+	kindsStr := request.GetString("kinds", "")
+	limit := request.GetInt("limit", 10)
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Parse kinds
+	var kinds []rpg.NodeKind
+	if kindsStr != "" {
+		kindParts := strings.Split(kindsStr, ",")
+		for _, k := range kindParts {
+			k = strings.TrimSpace(k)
+			switch k {
+			case "area":
+				kinds = append(kinds, rpg.KindArea)
+			case "category":
+				kinds = append(kinds, rpg.KindCategory)
+			case "subcategory":
+				kinds = append(kinds, rpg.KindSubcategory)
+			case "file":
+				kinds = append(kinds, rpg.KindFile)
+			case "symbol":
+				kinds = append(kinds, rpg.KindSymbol)
+			case "chunk":
+				kinds = append(kinds, rpg.KindChunk)
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("invalid kind: %s", k)), nil
+			}
+		}
+	}
+
+	// Build request
+	req := rpg.SearchNodeRequest{
+		Query: query,
+		Scope: scope,
+		Kinds: kinds,
+		Limit: limit,
+	}
+
+	// Execute search
+	results, err := qe.SearchNode(ctx, req)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("search failed: %v", err)), nil
+	}
+
+	// Encode output
+	output, err := encodeOutput(results, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode results: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(output), nil
+}
+
+// handleRPGFetch handles the grepai_rpg_fetch tool call.
+func (s *Server) handleRPGFetch(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	nodeID, err := request.RequireString("node_id")
+	if err != nil {
+		return mcp.NewToolResultError("node_id parameter is required"), nil
+	}
+
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Fetch node
+	result, err := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: nodeID})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("fetch failed: %v", err)), nil
+	}
+
+	if result == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("node not found: %s", nodeID)), nil
+	}
+
+	// Encode output
+	output, err := encodeOutput(result, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(output), nil
+}
+
+// handleRPGExplore handles the grepai_rpg_explore tool call.
+func (s *Server) handleRPGExplore(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	startNodeID, err := request.RequireString("start_node_id")
+	if err != nil {
+		return mcp.NewToolResultError("start_node_id parameter is required"), nil
+	}
+
+	direction := request.GetString("direction", "both")
+	depth := request.GetInt("depth", 2)
+	edgeTypesStr := request.GetString("edge_types", "")
+	limit := request.GetInt("limit", 100)
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Validate direction
+	if direction != "forward" && direction != "reverse" && direction != "both" {
+		return mcp.NewToolResultError("direction must be 'forward', 'reverse', or 'both'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Parse edge types
+	var edgeTypes []rpg.EdgeType
+	if edgeTypesStr != "" {
+		edgeParts := strings.Split(edgeTypesStr, ",")
+		for _, et := range edgeParts {
+			et = strings.TrimSpace(et)
+			switch et {
+			case "feature_parent":
+				edgeTypes = append(edgeTypes, rpg.EdgeFeatureParent)
+			case "contains":
+				edgeTypes = append(edgeTypes, rpg.EdgeContains)
+			case "invokes":
+				edgeTypes = append(edgeTypes, rpg.EdgeInvokes)
+			case "imports":
+				edgeTypes = append(edgeTypes, rpg.EdgeImports)
+			case "maps_to_chunk":
+				edgeTypes = append(edgeTypes, rpg.EdgeMapsToChunk)
+			case "semantic_sim":
+				edgeTypes = append(edgeTypes, rpg.EdgeSemanticSim)
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("invalid edge type: %s", et)), nil
+			}
+		}
+	}
+
+	// Build request
+	req := rpg.ExploreRequest{
+		StartNodeID: startNodeID,
+		Direction:   direction,
+		Depth:       depth,
+		EdgeTypes:   edgeTypes,
+		Limit:       limit,
+	}
+
+	// Execute exploration
+	result, err := qe.Explore(ctx, req)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("explore failed: %v", err)), nil
+	}
+
+	if result == nil {
+		return mcp.NewToolResultError(fmt.Sprintf("start node not found: %s", startNodeID)), nil
+	}
+
+	// Encode output
+	output, err := encodeOutput(result, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(output), nil
+}
+
+// handleTracePath handles the grepai_trace_path tool call.
+func (s *Server) handleTracePath(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	sourceID, err := request.RequireString("source_id")
+	if err != nil {
+		return mcp.NewToolResultError("source_id parameter is required"), nil
+	}
+
+	targetID, err := request.RequireString("target_id")
+	if err != nil {
+		return mcp.NewToolResultError("target_id parameter is required"), nil
+	}
+
+	edgeTypesStr := request.GetString("edge_types", "")
+	directionStr := request.GetString("direction", "both")
+	metricStr := request.GetString("metric", "cost")
+	format := request.GetString("format", "json")
+
+	// Validate format
+	if format != "json" && format != "toon" {
+		return mcp.NewToolResultError("format must be 'json' or 'toon'"), nil
+	}
+
+	// Validate direction
+	direction := rpg.DijkstraDirection(directionStr)
+	switch direction {
+	case rpg.DirForward, rpg.DirReverse, rpg.DirBoth:
+	default:
+		return mcp.NewToolResultError("direction must be 'forward', 'reverse', or 'both'"), nil
+	}
+
+	// Validate metric
+	metric := rpg.DistanceMetric(metricStr)
+	switch metric {
+	case rpg.MetricCost, rpg.MetricHops:
+	default:
+		return mcp.NewToolResultError("metric must be 'cost' or 'hops'"), nil
+	}
+
+	// Load RPG
+	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	if rpgSt == nil {
+		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
+	}
+	defer rpgSt.Close()
+
+	// Parse edge types
+	var edgeTypes []rpg.EdgeType
+	if edgeTypesStr != "" {
+		edgeParts := strings.Split(edgeTypesStr, ",")
+		for _, et := range edgeParts {
+			et = strings.TrimSpace(et)
+			switch et {
+			case "feature_parent":
+				edgeTypes = append(edgeTypes, rpg.EdgeFeatureParent)
+			case "contains":
+				edgeTypes = append(edgeTypes, rpg.EdgeContains)
+			case "invokes":
+				edgeTypes = append(edgeTypes, rpg.EdgeInvokes)
+			case "imports":
+				edgeTypes = append(edgeTypes, rpg.EdgeImports)
+			case "maps_to_chunk":
+				edgeTypes = append(edgeTypes, rpg.EdgeMapsToChunk)
+			case "semantic_sim":
+				edgeTypes = append(edgeTypes, rpg.EdgeSemanticSim)
+			default:
+				return mcp.NewToolResultError(fmt.Sprintf("invalid edge type: %s", et)), nil
+			}
+		}
+	}
+
+	// Execute shortest path
+	pathResult, err := qe.ShortestPath(ctx, rpg.ShortestPathRequest{
+		SourceID:  sourceID,
+		TargetID:  targetID,
+		EdgeTypes: edgeTypes,
+		Direction: direction,
+		Metric:    metric,
+	})
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("shortest path failed: %v", err)), nil
+	}
+
+	// Encode output
+	pathOutput, err := encodeOutput(pathResult, format)
+	if err != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to encode result: %v", err)), nil
+	}
+
+	return mcp.NewToolResultText(pathOutput), nil
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/yoanbernabeu/grepai/embedder"
 	"github.com/yoanbernabeu/grepai/git"
 	"github.com/yoanbernabeu/grepai/indexer"
+	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/store"
 	"github.com/yoanbernabeu/grepai/trace"
 	"github.com/yoanbernabeu/grepai/watcher"
@@ -649,6 +650,44 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 
 	extractor := trace.NewRegexExtractor()
 
+	// Initialize RPG if enabled.
+	var rpgIndexer *rpg.RPGIndexer
+	var rpgStore rpg.RPGStore
+	if cfg.RPG.Enabled {
+		rpgStore = rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
+		if err := rpgStore.Load(ctx); err != nil {
+			log.Printf("Warning: failed to load RPG index for %s: %v", projectRoot, err)
+		}
+
+		var featureExtractor rpg.FeatureExtractor
+		switch cfg.RPG.FeatureMode {
+		case "llm", "hybrid":
+			if cfg.RPG.LLMEndpoint == "" || cfg.RPG.LLMModel == "" {
+				log.Printf("Warning: RPG feature_mode=%q but llm_endpoint or llm_model is empty, falling back to local extractor", cfg.RPG.FeatureMode)
+				featureExtractor = rpg.NewLocalExtractor()
+			} else {
+				featureExtractor = rpg.NewLLMExtractor(rpg.LLMExtractorConfig{
+					Provider: cfg.RPG.LLMProvider,
+					Model:    cfg.RPG.LLMModel,
+					Endpoint: cfg.RPG.LLMEndpoint,
+					APIKey:   cfg.RPG.LLMAPIKey,
+					Timeout:  time.Duration(cfg.RPG.LLMTimeoutMs) * time.Millisecond,
+				})
+			}
+		default:
+			featureExtractor = rpg.NewLocalExtractor()
+		}
+
+		rpgIndexer = rpg.NewRPGIndexer(rpgStore, featureExtractor, projectRoot, rpg.RPGIndexerConfig{
+			DriftThreshold:       cfg.RPG.DriftThreshold,
+			MaxTraversalDepth:    cfg.RPG.MaxTraversalDepth,
+			FeatureGroupStrategy: cfg.RPG.FeatureGroupStrategy,
+		})
+	}
+	if rpgStore != nil {
+		defer rpgStore.Close()
+	}
+
 	tracedLanguages := cfg.Trace.EnabledLanguages
 	if len(tracedLanguages) == 0 {
 		tracedLanguages = []string{".go", ".js", ".ts", ".jsx", ".tsx", ".py", ".php", ".java", ".cs"}
@@ -665,6 +704,12 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 		cfg.Watch.LastIndexTime = time.Now()
 		if err := cfg.Save(projectRoot); err != nil {
 			log.Printf("Warning: failed to save config: %v", err)
+		}
+	}
+
+	if rpgIndexer != nil {
+		if err := rpgIndexer.BuildFull(ctx, symbolStore, st); err != nil {
+			log.Printf("Warning: failed to build RPG graph for %s: %v", projectRoot, err)
 		}
 	}
 
@@ -688,10 +733,10 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 	}
 
 	// Run watch loop (responds to ctx.Done() for graceful shutdown)
-	return runProjectWatchLoop(ctx, st, symbolStore, w, idx, scanner, extractor, tracedLanguages, projectRoot, cfg)
+	return runProjectWatchLoop(ctx, st, symbolStore, rpgStore, w, idx, scanner, extractor, rpgIndexer, tracedLanguages, projectRoot, cfg)
 }
 
-func runProjectWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.GOBSymbolStore, w *watcher.Watcher, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, tracedLanguages []string, projectRoot string, cfg *config.Config) error {
+func runProjectWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.GOBSymbolStore, rpgStore rpg.RPGStore, w *watcher.Watcher, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, rpgIndexer *rpg.RPGIndexer, tracedLanguages []string, projectRoot string, cfg *config.Config) error {
 	persistTicker := time.NewTicker(30 * time.Second)
 	defer persistTicker.Stop()
 
@@ -706,6 +751,11 @@ func runProjectWatchLoop(ctx context.Context, st store.VectorStore, symbolStore 
 			if err := symbolStore.Persist(ctx); err != nil {
 				log.Printf("Warning: failed to persist symbol index on shutdown for %s: %v", projectRoot, err)
 			}
+			if rpgStore != nil {
+				if err := rpgStore.Persist(ctx); err != nil {
+					log.Printf("Warning: failed to persist RPG graph on shutdown for %s: %v", projectRoot, err)
+				}
+			}
 			return nil
 
 		case <-persistTicker.C:
@@ -715,9 +765,14 @@ func runProjectWatchLoop(ctx context.Context, st store.VectorStore, symbolStore 
 			if err := symbolStore.Persist(ctx); err != nil {
 				log.Printf("Warning: failed to persist symbol index for %s: %v", projectRoot, err)
 			}
+			if rpgStore != nil {
+				if err := rpgStore.Persist(ctx); err != nil {
+					log.Printf("Warning: failed to persist RPG graph for %s: %v", projectRoot, err)
+				}
+			}
 
 		case event := <-w.Events():
-			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, projectRoot, cfg, &lastConfigWrite, event)
+			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, rpgIndexer, st, tracedLanguages, projectRoot, cfg, &lastConfigWrite, event)
 		}
 	}
 }
@@ -956,7 +1011,7 @@ func runWatchForeground() error {
 	return g.Wait()
 }
 
-func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, enabledLanguages []string, projectRoot string, cfg *config.Config, lastConfigWrite *time.Time, event watcher.FileEvent) {
+func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, rpgIndexer *rpg.RPGIndexer, vectorStore store.VectorStore, enabledLanguages []string, projectRoot string, cfg *config.Config, lastConfigWrite *time.Time, event watcher.FileEvent) {
 	log.Printf("[%s] %s", event.Type, event.Path)
 
 	switch event.Type {
@@ -1007,6 +1062,23 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 				log.Printf("Failed to save symbols for %s: %v", event.Path, err)
 			} else {
 				log.Printf("Extracted %d symbols from %s", len(symbols), event.Path)
+				if rpgIndexer != nil {
+					eventType := "create"
+					if event.Type == watcher.EventModify {
+						eventType = "modify"
+					}
+					if err := rpgIndexer.HandleFileEvent(ctx, eventType, fileInfo.Path, symbols); err != nil {
+						log.Printf("Warning: failed to update RPG for %s: %v", event.Path, err)
+					}
+					if vectorStore != nil {
+						chunks, err := vectorStore.GetChunksForFile(ctx, fileInfo.Path)
+						if err != nil {
+							log.Printf("Warning: failed to load chunks for RPG linking %s: %v", event.Path, err)
+						} else if err := rpgIndexer.LinkChunksForFile(ctx, fileInfo.Path, chunks); err != nil {
+							log.Printf("Warning: failed to link RPG chunks for %s: %v", event.Path, err)
+						}
+					}
+				}
 			}
 		}
 
@@ -1018,6 +1090,11 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 		// Also remove from symbol index
 		if err := symbolStore.DeleteFile(ctx, event.Path); err != nil {
 			log.Printf("Failed to remove symbols for %s: %v", event.Path, err)
+		}
+		if rpgIndexer != nil {
+			if err := rpgIndexer.HandleFileEvent(ctx, "delete", event.Path, nil); err != nil {
+				log.Printf("Warning: failed to update RPG for deleted %s: %v", event.Path, err)
+			}
 		}
 		log.Printf("Removed %s from index", event.Path)
 	}

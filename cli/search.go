@@ -5,40 +5,57 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/alpkeskin/gotoon"
 	"github.com/spf13/cobra"
 	"github.com/yoanbernabeu/grepai/config"
 	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/yoanbernabeu/grepai/rpg"
 	"github.com/yoanbernabeu/grepai/search"
 	"github.com/yoanbernabeu/grepai/store"
 )
 
 var (
-	searchLimit     int
-	searchJSON      bool
-	searchTOON      bool
-	searchCompact   bool
-	searchWorkspace string
-	searchProjects  []string
+	searchLimit              int
+	searchJSON               bool
+	searchTOON               bool
+	searchCompact            bool
+	searchWorkspace          string
+	searchProjects           []string
+	searchDistanceFrom       string
+	searchDistanceFromSymbol string
+	searchDistanceFromFile   string
+	searchDistanceMax        float64
+	searchDistanceMetric     string
+	searchDistanceEdgeTypes  string
+	searchDistanceDirection  string
+	searchSort               string
+	searchDistanceWeight     float64
 )
 
 // SearchResultJSON is a lightweight struct for JSON output (excludes vector, hash, updated_at)
 type SearchResultJSON struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float32 `json:"score"`
-	Content   string  `json:"content"`
+	FilePath    string   `json:"file_path"`
+	StartLine   int      `json:"start_line"`
+	EndLine     int      `json:"end_line"`
+	Score       float32  `json:"score"`
+	Content     string   `json:"content"`
+	FeaturePath string   `json:"feature_path,omitempty"`
+	SymbolName  string   `json:"symbol_name,omitempty"`
+	Distance    *float64 `json:"distance,omitempty"`
 }
 
 // SearchResultCompactJSON is a minimal struct for compact JSON output (no content field)
 type SearchResultCompactJSON struct {
-	FilePath  string  `json:"file_path"`
-	StartLine int     `json:"start_line"`
-	EndLine   int     `json:"end_line"`
-	Score     float32 `json:"score"`
+	FilePath    string   `json:"file_path"`
+	StartLine   int      `json:"start_line"`
+	EndLine     int      `json:"end_line"`
+	Score       float32  `json:"score"`
+	FeaturePath string   `json:"feature_path,omitempty"`
+	SymbolName  string   `json:"symbol_name,omitempty"`
+	Distance    *float64 `json:"distance,omitempty"`
 }
 
 var searchCmd = &cobra.Command{
@@ -61,7 +78,221 @@ func init() {
 	searchCmd.Flags().BoolVarP(&searchCompact, "compact", "c", false, "Output minimal format without content (requires --json or --toon)")
 	searchCmd.Flags().StringVar(&searchWorkspace, "workspace", "", "Workspace name for cross-project search")
 	searchCmd.Flags().StringArrayVar(&searchProjects, "project", nil, "Project name(s) to search (requires --workspace, can be repeated)")
+	searchCmd.Flags().StringVar(&searchDistanceFrom, "distance-from", "", "RPG node ID to compute distance from each result (requires RPG enabled)")
+	searchCmd.Flags().StringVar(&searchDistanceFromSymbol, "distance-from-symbol", "", "Symbol name to resolve to RPG node ID for distance computation")
+	searchCmd.Flags().StringVar(&searchDistanceFromFile, "distance-from-file", "", "File path to use as RPG node ID for distance computation")
+	searchCmd.Flags().Float64Var(&searchDistanceMax, "distance-max", 0, "Maximum distance to include (0 = no limit)")
+	searchCmd.Flags().StringVar(&searchDistanceMetric, "distance-metric", "cost", "Distance metric: cost (1/weight) or hops (uniform 1.0)")
+	searchCmd.Flags().StringVar(&searchDistanceEdgeTypes, "distance-edge-types", "", "Comma-separated edge types for distance: feature_parent,contains,invokes,imports,maps_to_chunk,semantic_sim")
+	searchCmd.Flags().StringVar(&searchDistanceDirection, "distance-direction", "both", "Distance traversal direction: forward, reverse, or both")
+	searchCmd.Flags().StringVar(&searchSort, "sort", "score", "Sort results by: score, distance, or combined")
+	searchCmd.Flags().Float64Var(&searchDistanceWeight, "distance-weight", 0.0, "Alpha for combined sort: combined = score / (1 + alpha * distance)")
 	searchCmd.MarkFlagsMutuallyExclusive("json", "toon")
+	searchCmd.MarkFlagsMutuallyExclusive("distance-from", "distance-from-symbol", "distance-from-file")
+}
+
+// rpgEnrichment holds RPG context for a search result
+type rpgEnrichment struct {
+	FeaturePath string
+	SymbolName  string
+	Distance    *float64 // nil = not measured, negative = unreachable
+}
+
+// distanceOpts bundles all distance-related parameters for enrichWithRPG.
+type distanceOpts struct {
+	From       string
+	FromSymbol string
+	FromFile   string
+	Max        float64
+	Metric     string // "cost" or "hops"
+	EdgeTypes  string // comma-separated edge types
+	Direction  string // "forward", "reverse", or "both"
+}
+
+// resolveDistanceFrom resolves --distance-from, --distance-from-symbol, or --distance-from-file
+// to a single RPG node ID. Returns "" if no distance flag is set.
+func resolveDistanceFrom(qe *rpg.QueryEngine, distanceFrom, distanceFromSymbol, distanceFromFile string) (string, error) {
+	if distanceFrom != "" {
+		return distanceFrom, nil
+	}
+	if distanceFromSymbol != "" {
+		matches, err := qe.ResolveSymbol(distanceFromSymbol)
+		if err != nil {
+			return "", err
+		}
+		if len(matches) > 1 {
+			var candidates []string
+			for _, m := range matches {
+				candidates = append(candidates, fmt.Sprintf("  %s (%s)", m.ID, m.Path))
+			}
+			return "", fmt.Errorf("ambiguous symbol %q, %d candidates:\n%s", distanceFromSymbol, len(matches), strings.Join(candidates, "\n"))
+		}
+		return matches[0].ID, nil
+	}
+	if distanceFromFile != "" {
+		return "file:" + distanceFromFile, nil
+	}
+	return "", nil
+}
+
+// enrichWithRPG enriches search results with RPG feature paths, symbol names, and optional distance.
+// When distanceFrom is set, RPG load failures become hard errors instead of best-effort.
+func enrichWithRPG(projectRoot string, cfg *config.Config, results []store.SearchResult, distanceFrom, distanceFromSymbol, distanceFromFile string, distanceMax float64, opts ...distanceOpts) ([]rpgEnrichment, error) {
+	enrichments := make([]rpgEnrichment, len(results))
+	wantDistance := distanceFrom != "" || distanceFromSymbol != "" || distanceFromFile != ""
+
+	// Extract optional distance opts
+	var dOpts distanceOpts
+	if len(opts) > 0 {
+		dOpts = opts[0]
+	}
+
+	if !cfg.RPG.Enabled {
+		if wantDistance {
+			return nil, fmt.Errorf("distance flags require RPG to be enabled")
+		}
+		return enrichments, nil
+	}
+
+	ctx := context.Background()
+	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
+	if err := rpgStore.Load(ctx); err != nil {
+		if wantDistance {
+			return nil, fmt.Errorf("failed to load RPG index for distance computation: %w", err)
+		}
+		return enrichments, nil
+	}
+	defer rpgStore.Close()
+
+	graph := rpgStore.GetGraph()
+	if wantDistance && graph.Stats().TotalNodes == 0 {
+		return nil, fmt.Errorf("RPG index is empty; cannot compute distances. Run 'grepai watch' first")
+	}
+
+	qe := rpg.NewQueryEngine(graph)
+
+	// Resolve the source node ID
+	resolvedSource, err := resolveDistanceFrom(qe, distanceFrom, distanceFromSymbol, distanceFromFile)
+	if err != nil {
+		return nil, err
+	}
+
+	// Validate source node exists when distance is requested
+	if resolvedSource != "" && graph.GetNode(resolvedSource) == nil {
+		return nil, fmt.Errorf("distance-from node not found in RPG graph: %s", resolvedSource)
+	}
+
+	// Pre-fill distance to -1 when distance is requested
+	if resolvedSource != "" {
+		for i := range enrichments {
+			d := -1.0
+			enrichments[i].Distance = &d
+		}
+	}
+
+	// First pass: find target node IDs for each result
+	type resultTarget struct {
+		nodeID string
+		node   *rpg.Node
+	}
+	targets := make([]resultTarget, len(results))
+
+	for i, r := range results {
+		nodes := graph.GetNodesByFile(r.Chunk.FilePath)
+		for _, n := range nodes {
+			if n.Kind == rpg.KindSymbol && n.StartLine <= r.Chunk.EndLine && r.Chunk.StartLine <= n.EndLine {
+				fetchResult, fetchErr := qe.FetchNode(ctx, rpg.FetchNodeRequest{NodeID: n.ID})
+				if fetchErr == nil && fetchResult != nil {
+					enrichments[i].FeaturePath = fetchResult.FeaturePath
+					enrichments[i].SymbolName = n.SymbolName
+				}
+				targets[i] = resultTarget{nodeID: n.ID, node: n}
+				break
+			}
+		}
+	}
+
+	// Second pass: single DistancesFrom call for all targets
+	if resolvedSource != "" {
+		distReq := rpg.DistancesFromRequest{
+			SourceID:  resolvedSource,
+			MaxCost:   distanceMax,
+			Direction: rpg.DijkstraDirection(dOpts.Direction),
+			Metric:    rpg.DistanceMetric(dOpts.Metric),
+		}
+		if dOpts.EdgeTypes != "" {
+			for _, et := range strings.Split(dOpts.EdgeTypes, ",") {
+				et = strings.TrimSpace(et)
+				if et != "" {
+					distReq.EdgeTypes = append(distReq.EdgeTypes, rpg.EdgeType(et))
+				}
+			}
+		}
+		distResult, distErr := qe.DistancesFrom(ctx, distReq)
+		if distErr == nil && distResult != nil {
+			for i := range results {
+				if targets[i].nodeID == "" {
+					continue
+				}
+				if d, ok := distResult.Distances[targets[i].nodeID]; ok {
+					enrichments[i].Distance = &d
+				}
+			}
+		}
+	}
+
+	return enrichments, nil
+}
+
+// combinedScore computes score / (1 + alpha * distance).
+// Returns 0 for unreachable results (distance < 0 or nil).
+func combinedScore(score float32, distance *float64, alpha float64) float64 {
+	if distance == nil || *distance < 0 {
+		return 0
+	}
+	return float64(score) / (1.0 + alpha*(*distance))
+}
+
+// sortResults re-orders results and enrichments in place by the given sort mode.
+func sortResults(results []store.SearchResult, enrichments []rpgEnrichment, sortMode string, alpha float64) {
+	// Build index slice for co-sorting
+	indices := make([]int, len(results))
+	for i := range indices {
+		indices[i] = i
+	}
+
+	sort.SliceStable(indices, func(a, b int) bool {
+		ia, ib := indices[a], indices[b]
+		switch sortMode {
+		case "distance":
+			da := enrichments[ia].Distance
+			db := enrichments[ib].Distance
+			// nil/unreachable goes last
+			if da == nil || *da < 0 {
+				return false
+			}
+			if db == nil || *db < 0 {
+				return true
+			}
+			return *da < *db
+		case "combined":
+			ca := combinedScore(results[ia].Score, enrichments[ia].Distance, alpha)
+			cb := combinedScore(results[ib].Score, enrichments[ib].Distance, alpha)
+			return ca > cb // descending
+		default: // "score" - already sorted by score
+			return results[ia].Score > results[ib].Score
+		}
+	})
+
+	// Apply permutation
+	sortedResults := make([]store.SearchResult, len(results))
+	sortedEnrichments := make([]rpgEnrichment, len(enrichments))
+	for i, idx := range indices {
+		sortedResults[i] = results[idx]
+		sortedEnrichments[i] = enrichments[idx]
+	}
+	copy(results, sortedResults)
+	copy(enrichments, sortedEnrichments)
 }
 
 func runSearch(cmd *cobra.Command, args []string) error {
@@ -76,6 +307,12 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	// Validate workspace-related flags
 	if len(searchProjects) > 0 && searchWorkspace == "" {
 		return fmt.Errorf("--project flag requires --workspace flag")
+	}
+
+	// Validate distance-from flags
+	wantDistance := searchDistanceFrom != "" || searchDistanceFromSymbol != "" || searchDistanceFromFile != ""
+	if wantDistance && searchWorkspace != "" {
+		return fmt.Errorf("distance flags are not supported with --workspace (RPG is per-project)")
 	}
 
 	// Workspace mode
@@ -93,6 +330,11 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load(projectRoot)
 	if err != nil {
 		return fmt.Errorf("failed to load configuration: %w", err)
+	}
+
+	// Validate distance flags require RPG
+	if wantDistance && !cfg.RPG.Enabled {
+		return fmt.Errorf("distance flags require RPG to be enabled (set rpg.enabled: true in .grepai/config.yaml)")
 	}
 
 	// Initialize embedder
@@ -181,20 +423,35 @@ func runSearch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("search failed: %w", err)
 	}
 
+	// Enrich results with RPG context
+	enrichments, enrichErr := enrichWithRPG(projectRoot, cfg, results, searchDistanceFrom, searchDistanceFromSymbol, searchDistanceFromFile, searchDistanceMax, distanceOpts{
+		Metric:    searchDistanceMetric,
+		EdgeTypes: searchDistanceEdgeTypes,
+		Direction: searchDistanceDirection,
+	})
+	if enrichErr != nil {
+		return enrichErr
+	}
+
+	// Sort results if requested
+	if searchSort != "" && searchSort != "score" {
+		sortResults(results, enrichments, searchSort, searchDistanceWeight)
+	}
+
 	// JSON output mode
 	if searchJSON {
 		if searchCompact {
-			return outputSearchCompactJSON(results)
+			return outputSearchCompactJSON(results, enrichments)
 		}
-		return outputSearchJSON(results)
+		return outputSearchJSON(results, enrichments)
 	}
 
 	// TOON output mode
 	if searchTOON {
 		if searchCompact {
-			return outputSearchCompactTOON(results)
+			return outputSearchCompactTOON(results, enrichments)
 		}
-		return outputSearchTOON(results)
+		return outputSearchTOON(results, enrichments)
 	}
 
 	if len(results) == 0 {
@@ -208,6 +465,21 @@ func runSearch(cmd *cobra.Command, args []string) error {
 	for i, result := range results {
 		fmt.Printf("─── Result %d (score: %.4f) ───\n", i+1, result.Score)
 		fmt.Printf("File: %s:%d-%d\n", result.Chunk.FilePath, result.Chunk.StartLine, result.Chunk.EndLine)
+		if enrichments[i].Distance != nil {
+			d := *enrichments[i].Distance
+			distLabel := searchDistanceFrom
+			if distLabel == "" {
+				distLabel = searchDistanceFromSymbol
+			}
+			if distLabel == "" {
+				distLabel = searchDistanceFromFile
+			}
+			if d < 0 {
+				fmt.Printf("Distance from %s: unreachable\n", distLabel)
+			} else {
+				fmt.Printf("Distance from %s: %.4f\n", distLabel, d)
+			}
+		}
 		fmt.Println()
 
 		// Display content with line numbers
@@ -233,15 +505,18 @@ func runSearch(cmd *cobra.Command, args []string) error {
 }
 
 // outputSearchJSON outputs results in JSON format for AI agents
-func outputSearchJSON(results []store.SearchResult) error {
+func outputSearchJSON(results []store.SearchResult, enrichments []rpgEnrichment) error {
 	jsonResults := make([]SearchResultJSON, len(results))
 	for i, r := range results {
 		jsonResults[i] = SearchResultJSON{
-			FilePath:  r.Chunk.FilePath,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Score:     r.Score,
-			Content:   r.Chunk.Content,
+			FilePath:    r.Chunk.FilePath,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Score:       r.Score,
+			Content:     r.Chunk.Content,
+			FeaturePath: enrichments[i].FeaturePath,
+			SymbolName:  enrichments[i].SymbolName,
+			Distance:    enrichments[i].Distance,
 		}
 	}
 
@@ -251,14 +526,17 @@ func outputSearchJSON(results []store.SearchResult) error {
 }
 
 // outputSearchCompactJSON outputs results in minimal JSON format (without content)
-func outputSearchCompactJSON(results []store.SearchResult) error {
+func outputSearchCompactJSON(results []store.SearchResult, enrichments []rpgEnrichment) error {
 	jsonResults := make([]SearchResultCompactJSON, len(results))
 	for i, r := range results {
 		jsonResults[i] = SearchResultCompactJSON{
-			FilePath:  r.Chunk.FilePath,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Score:     r.Score,
+			FilePath:    r.Chunk.FilePath,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Score:       r.Score,
+			FeaturePath: enrichments[i].FeaturePath,
+			SymbolName:  enrichments[i].SymbolName,
+			Distance:    enrichments[i].Distance,
 		}
 	}
 
@@ -276,15 +554,18 @@ func outputSearchErrorJSON(err error) error {
 }
 
 // outputSearchTOON outputs results in TOON format for AI agents
-func outputSearchTOON(results []store.SearchResult) error {
+func outputSearchTOON(results []store.SearchResult, enrichments []rpgEnrichment) error {
 	toonResults := make([]SearchResultJSON, len(results))
 	for i, r := range results {
 		toonResults[i] = SearchResultJSON{
-			FilePath:  r.Chunk.FilePath,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Score:     r.Score,
-			Content:   r.Chunk.Content,
+			FilePath:    r.Chunk.FilePath,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Score:       r.Score,
+			Content:     r.Chunk.Content,
+			FeaturePath: enrichments[i].FeaturePath,
+			SymbolName:  enrichments[i].SymbolName,
+			Distance:    enrichments[i].Distance,
 		}
 	}
 
@@ -297,14 +578,17 @@ func outputSearchTOON(results []store.SearchResult) error {
 }
 
 // outputSearchCompactTOON outputs results in minimal TOON format (without content)
-func outputSearchCompactTOON(results []store.SearchResult) error {
+func outputSearchCompactTOON(results []store.SearchResult, enrichments []rpgEnrichment) error {
 	toonResults := make([]SearchResultCompactJSON, len(results))
 	for i, r := range results {
 		toonResults[i] = SearchResultCompactJSON{
-			FilePath:  r.Chunk.FilePath,
-			StartLine: r.Chunk.StartLine,
-			EndLine:   r.Chunk.EndLine,
-			Score:     r.Score,
+			FilePath:    r.Chunk.FilePath,
+			StartLine:   r.Chunk.StartLine,
+			EndLine:     r.Chunk.EndLine,
+			Score:       r.Score,
+			FeaturePath: enrichments[i].FeaturePath,
+			SymbolName:  enrichments[i].SymbolName,
+			Distance:    enrichments[i].Distance,
 		}
 	}
 
@@ -508,20 +792,23 @@ func runWorkspaceSearch(ctx context.Context, query string) error {
 		results = filteredResults
 	}
 
+	// Workspace mode doesn't have RPG enrichment (no single projectRoot)
+	enrichments := make([]rpgEnrichment, len(results))
+
 	// JSON output mode
 	if searchJSON {
 		if searchCompact {
-			return outputSearchCompactJSON(results)
+			return outputSearchCompactJSON(results, enrichments)
 		}
-		return outputSearchJSON(results)
+		return outputSearchJSON(results, enrichments)
 	}
 
 	// TOON output mode
 	if searchTOON {
 		if searchCompact {
-			return outputSearchCompactTOON(results)
+			return outputSearchCompactTOON(results, enrichments)
 		}
-		return outputSearchTOON(results)
+		return outputSearchTOON(results, enrichments)
 	}
 
 	if len(results) == 0 {
