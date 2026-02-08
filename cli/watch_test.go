@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -93,6 +94,44 @@ func TestShowWatchStatus_WorktreeRunning(t *testing.T) {
 	err := showWatchStatus(logDir, worktreeID)
 	if err != nil {
 		t.Fatalf("showWatchStatus() failed: %v", err)
+	}
+}
+
+func TestShowWatchStatus_WorktreeFallbackToGlobalPID(t *testing.T) {
+	skipIfWindows(t)
+	logDir := t.TempDir()
+
+	// Write only global PID file to exercise worktree -> global fallback path.
+	if err := daemon.WritePIDFile(logDir); err != nil {
+		t.Fatalf("WritePIDFile() failed: %v", err)
+	}
+	defer daemon.RemovePIDFile(logDir)
+
+	// Capture stdout and verify status reports running.
+	originalStdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() failed: %v", err)
+	}
+	os.Stdout = w
+	defer func() {
+		os.Stdout = originalStdout
+	}()
+
+	if err := showWatchStatus(logDir, "wt-fallback"); err != nil {
+		t.Fatalf("showWatchStatus() failed: %v", err)
+	}
+
+	if err := w.Close(); err != nil {
+		t.Fatalf("stdout pipe close failed: %v", err)
+	}
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("failed to read stdout: %v", err)
+	}
+
+	if !strings.Contains(string(output), "Status: running") {
+		t.Fatalf("showWatchStatus() output = %q, want to contain %q", string(output), "Status: running")
 	}
 }
 

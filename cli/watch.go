@@ -50,11 +50,11 @@ The watcher will:
 - Handle atomic updates to avoid duplicate vectors
 - Show real-time progress for initial indexing/embedding/RPG graph build in foreground mode
 
-Background mode:
-  grepai watch --background              Run in background with default log directory
-  grepai watch --background --log-dir /custom/path  Run with custom log directory
-  grepai watch --status                  Check if background watcher is running
-  grepai watch --stop                    Stop the background watcher
+	Background mode:
+	  grepai watch --background              Run in background with default log directory
+	  grepai watch --background --log-dir /custom/path  Run with custom log directory
+	  grepai watch --status                  Check if watcher is running
+	  grepai watch --stop                    Stop the running watcher
 
 Default log directories:
   Linux:   ~/.local/state/grepai/logs/grepai-watch.log (or $XDG_STATE_HOME)
@@ -72,8 +72,8 @@ Log management:
 func init() {
 	watchCmd.Flags().BoolVar(&watchBackground, "background", false, "Run in background mode")
 	watchCmd.Flags().StringVar(&watchLogDir, "log-dir", "", "Directory for log files (default: OS-specific)")
-	watchCmd.Flags().BoolVar(&watchStatus, "status", false, "Show background watcher status")
-	watchCmd.Flags().BoolVar(&watchStop, "stop", false, "Stop the background watcher")
+	watchCmd.Flags().BoolVar(&watchStatus, "status", false, "Show watcher status")
+	watchCmd.Flags().BoolVar(&watchStop, "stop", false, "Stop the running watcher")
 	watchCmd.Flags().StringVar(&watchWorkspace, "workspace", "", "Workspace name for multi-project mode")
 }
 
@@ -135,7 +135,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return startBackgroundWatch(logDir, worktreeID)
 	}
 
-	// Check if already running in background (automatically cleans up stale PIDs)
+	// Check if already running (automatically cleans up stale PIDs)
 	var pid int
 	if worktreeID != "" {
 		pid, err = daemon.GetRunningWorktreePID(logDir, worktreeID)
@@ -150,7 +150,7 @@ func runWatch(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("failed to check running status: %w", err)
 	}
 	if pid > 0 {
-		return fmt.Errorf("watcher is already running in background (PID %d)\nUse 'grepai watch --stop' to stop it", pid)
+		return fmt.Errorf("watcher is already running (PID %d)\nUse 'grepai watch --stop' to stop it", pid)
 	}
 
 	// Run in foreground mode
@@ -166,6 +166,11 @@ func showWatchStatus(logDir, worktreeID string) error {
 	if worktreeID != "" {
 		pid, err = daemon.GetRunningWorktreePID(logDir, worktreeID)
 		logFile = daemon.GetWorktreeLogFile(logDir, worktreeID)
+		if err == nil && pid == 0 {
+			// Backward-compatibility fallback when a watcher wrote the global PID file.
+			pid, err = daemon.GetRunningPID(logDir)
+			logFile = filepath.Join(logDir, "grepai-watch.log")
+		}
 	} else {
 		pid, err = daemon.GetRunningPID(logDir)
 		logFile = filepath.Join(logDir, "grepai-watch.log")
@@ -204,6 +209,11 @@ func stopWatchDaemon(logDir, worktreeID string) error {
 	if worktreeID != "" {
 		pid, err = daemon.GetRunningWorktreePID(logDir, worktreeID)
 		logFile = daemon.GetWorktreeLogFile(logDir, worktreeID)
+		if err == nil && pid == 0 {
+			// Backward-compatibility fallback when a watcher wrote the global PID file.
+			pid, err = daemon.GetRunningPID(logDir)
+			logFile = filepath.Join(logDir, "grepai-watch.log")
+		}
 	} else {
 		pid, err = daemon.GetRunningPID(logDir)
 		logFile = filepath.Join(logDir, "grepai-watch.log")
@@ -214,11 +224,11 @@ func stopWatchDaemon(logDir, worktreeID string) error {
 	}
 
 	if pid == 0 {
-		fmt.Println("No background watcher is running")
+		fmt.Println("No watcher is running")
 		return nil
 	}
 
-	fmt.Printf("Stopping background watcher (PID %d)...\n", pid)
+	fmt.Printf("Stopping watcher (PID %d)...\n", pid)
 	if err := daemon.StopProcess(pid); err != nil {
 		return fmt.Errorf("failed to stop process: %w", err)
 	}
@@ -871,57 +881,53 @@ func runWatchForeground() error {
 	// Detect if running as background child process
 	isBackgroundChild := os.Getenv("GREPAI_BACKGROUND") == "1"
 
-	// If running in background, determine log directory and write PID file
+	// Determine runtime context and write PID file for both foreground/background modes.
 	var logDir string
 	var worktreeID string
+	var err error
+	logDir = watchLogDir
+	if logDir == "" {
+		logDir, err = daemon.GetDefaultLogDir()
+		if err != nil {
+			return fmt.Errorf("failed to get default log directory: %w", err)
+		}
+	}
+
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("failed to get current directory: %w", err)
+	}
+
+	gitInfo, gitErr := git.Detect(cwd)
+	if gitErr == nil && gitInfo.WorktreeID != "" {
+		worktreeID = gitInfo.WorktreeID
+	}
+
+	if worktreeID != "" {
+		if err := daemon.WriteWorktreePIDFile(logDir, worktreeID); err != nil {
+			return fmt.Errorf("failed to write PID file: %w", err)
+		}
+	} else {
+		if err := daemon.WritePIDFile(logDir); err != nil {
+			return fmt.Errorf("failed to write PID file: %w", err)
+		}
+	}
+	defer func() {
+		if worktreeID != "" {
+			if err := daemon.RemoveWorktreePIDFile(logDir, worktreeID); err != nil {
+				log.Printf("Warning: failed to remove PID file on exit: %v", err)
+			}
+		} else {
+			if err := daemon.RemovePIDFile(logDir); err != nil {
+				log.Printf("Warning: failed to remove PID file on exit: %v", err)
+			}
+		}
+	}()
+
 	if isBackgroundChild {
 		// Configure structured logging with timestamps for daemon mode
 		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 		log.SetPrefix("[grepai-watch] ")
-
-		var err error
-		logDir = watchLogDir
-		if logDir == "" {
-			logDir, err = daemon.GetDefaultLogDir()
-			if err != nil {
-				return fmt.Errorf("failed to get default log directory: %w", err)
-			}
-		}
-
-		// Detect worktree
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("failed to get current directory: %w", err)
-		}
-
-		gitInfo, gitErr := git.Detect(cwd)
-		if gitErr == nil && gitInfo.WorktreeID != "" {
-			worktreeID = gitInfo.WorktreeID
-		}
-
-		// Write PID file
-		if worktreeID != "" {
-			if err := daemon.WriteWorktreePIDFile(logDir, worktreeID); err != nil {
-				return fmt.Errorf("failed to write PID file: %w", err)
-			}
-		} else {
-			if err := daemon.WritePIDFile(logDir); err != nil {
-				return fmt.Errorf("failed to write PID file: %w", err)
-			}
-		}
-
-		// Ensure PID file is removed on exit
-		defer func() {
-			if worktreeID != "" {
-				if err := daemon.RemoveWorktreePIDFile(logDir, worktreeID); err != nil {
-					log.Printf("Warning: failed to remove PID file on exit: %v", err)
-				}
-			} else {
-				if err := daemon.RemovePIDFile(logDir); err != nil {
-					log.Printf("Warning: failed to remove PID file on exit: %v", err)
-				}
-			}
-		}()
 	}
 
 	// Find project root
@@ -1345,7 +1351,7 @@ func runWorkspaceWatch(logDir string) error {
 		return fmt.Errorf("failed to check running status: %w", err)
 	}
 	if pid > 0 {
-		return fmt.Errorf("workspace watcher is already running in background (PID %d)\nUse 'grepai watch --workspace %s --stop' to stop it", pid, watchWorkspace)
+		return fmt.Errorf("workspace watcher is already running (PID %d)\nUse 'grepai watch --workspace %s --stop' to stop it", pid, watchWorkspace)
 	}
 
 	// Run in foreground mode
@@ -1383,7 +1389,7 @@ func stopWorkspaceWatchDaemon(logDir, workspaceName string) error {
 	}
 
 	if pid == 0 {
-		fmt.Printf("No background watcher is running for workspace %s\n", workspaceName)
+		fmt.Printf("No watcher is running for workspace %s\n", workspaceName)
 		return nil
 	}
 
@@ -1472,19 +1478,19 @@ func runWorkspaceWatchForeground(logDir string, ws *config.Workspace) error {
 
 	isBackgroundChild := os.Getenv("GREPAI_BACKGROUND") == "1"
 
-	// If running in background, write PID file
+	// Write PID file for both foreground/background modes.
+	if err := daemon.WriteWorkspacePIDFile(logDir, ws.Name); err != nil {
+		return fmt.Errorf("failed to write PID file: %w", err)
+	}
+	defer func() {
+		if err := daemon.RemoveWorkspacePIDFile(logDir, ws.Name); err != nil {
+			log.Printf("Warning: failed to remove PID file on exit: %v", err)
+		}
+	}()
+
 	if isBackgroundChild {
 		log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
 		log.SetPrefix(fmt.Sprintf("[grepai-workspace-%s] ", ws.Name))
-
-		if err := daemon.WriteWorkspacePIDFile(logDir, ws.Name); err != nil {
-			return fmt.Errorf("failed to write PID file: %w", err)
-		}
-		defer func() {
-			if err := daemon.RemoveWorkspacePIDFile(logDir, ws.Name); err != nil {
-				log.Printf("Warning: failed to remove PID file on exit: %v", err)
-			}
-		}()
 	}
 
 	if !isBackgroundChild {
