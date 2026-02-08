@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/yoanbernabeu/grepai/store"
+	"github.com/yoanbernabeu/grepai/trace"
 )
 
 func TestCapGroup_Deterministic(t *testing.T) {
@@ -642,4 +643,100 @@ func TestWireFeatureSimilarity_LargeGroupSplit(t *testing.T) {
 	if simCount != 0 {
 		t.Errorf("Expected 0 EdgeSemanticSim edges (same-file within each dir subgroup), got %d", simCount)
 	}
+}
+
+func TestBuildFullWithProgress_EmitsStages(t *testing.T) {
+	ctx := context.Background()
+	tmpDir := t.TempDir()
+
+	vectorStore := store.NewGOBStore(filepath.Join(tmpDir, "vectors.gob"))
+	if err := vectorStore.SaveChunks(ctx, []store.Chunk{
+		{ID: "chunk-a", FilePath: "a.go", StartLine: 1, EndLine: 10, Content: "func FuncA() { FuncB() }"},
+		{ID: "chunk-b", FilePath: "b.go", StartLine: 1, EndLine: 10, Content: "func FuncB() {}"},
+	}); err != nil {
+		t.Fatalf("SaveChunks failed: %v", err)
+	}
+	if err := vectorStore.SaveDocument(ctx, store.Document{
+		Path:     "a.go",
+		ChunkIDs: []string{"chunk-a"},
+	}); err != nil {
+		t.Fatalf("SaveDocument(a.go) failed: %v", err)
+	}
+	if err := vectorStore.SaveDocument(ctx, store.Document{
+		Path:     "b.go",
+		ChunkIDs: []string{"chunk-b"},
+	}); err != nil {
+		t.Fatalf("SaveDocument(b.go) failed: %v", err)
+	}
+
+	symbolStore := trace.NewGOBSymbolStore(filepath.Join(tmpDir, "symbols.gob"))
+	if err := symbolStore.SaveFile(ctx, "a.go", []trace.Symbol{
+		{
+			Name:     "FuncA",
+			Kind:     trace.KindFunction,
+			File:     "a.go",
+			Line:     1,
+			EndLine:  10,
+			Language: "go",
+		},
+	}, []trace.Reference{
+		{
+			SymbolName: "FuncB",
+			File:       "a.go",
+			Line:       2,
+			CallerName: "FuncA",
+		},
+	}); err != nil {
+		t.Fatalf("SaveFile(a.go) failed: %v", err)
+	}
+	if err := symbolStore.SaveFile(ctx, "b.go", []trace.Symbol{
+		{
+			Name:     "FuncB",
+			Kind:     trace.KindFunction,
+			File:     "b.go",
+			Line:     1,
+			EndLine:  10,
+			Language: "go",
+		},
+	}, nil); err != nil {
+		t.Fatalf("SaveFile(b.go) failed: %v", err)
+	}
+
+	rpgStore := NewGOBRPGStore(filepath.Join(tmpDir, "rpg.gob"))
+	indexer := NewRPGIndexer(rpgStore, NewLocalExtractor(), tmpDir, RPGIndexerConfig{
+		DriftThreshold:       0.35,
+		FeatureGroupStrategy: "sample",
+	})
+
+	var events []BuildProgress
+	err := indexer.BuildFullWithProgress(ctx, symbolStore, vectorStore, func(p BuildProgress) {
+		events = append(events, p)
+	})
+	if err != nil {
+		t.Fatalf("BuildFullWithProgress failed: %v", err)
+	}
+
+	requiredStages := []string{"prepare", "symbols", "calls", "imports", "semantic", "chunks", "hierarchy", "persist"}
+	for _, stage := range requiredStages {
+		if !containsBuildStage(events, stage) {
+			t.Fatalf("missing progress stage %q; events=%+v", stage, events)
+		}
+	}
+
+	graphStats := rpgStore.GetGraph().Stats()
+	if graphStats.TotalNodes == 0 {
+		t.Fatal("expected RPG nodes to be created")
+	}
+	if graphStats.TotalEdges == 0 {
+		t.Fatal("expected RPG edges to be created")
+	}
+}
+
+func containsBuildStage(events []BuildProgress, stage string) bool {
+	for _, e := range events {
+		if e.Stage == stage {
+			return true
+		}
+	}
+	return false
 }

@@ -412,6 +412,41 @@ func initializeStore(ctx context.Context, cfg *config.Config, projectRoot string
 
 const configWriteThrottle = 30 * time.Second
 
+func hasIndexChanges(stats *indexer.IndexStats) bool {
+	if stats == nil {
+		return false
+	}
+	return stats.FilesIndexed > 0 || stats.FilesRemoved > 0 || stats.ChunksCreated > 0
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func shouldRebuildSymbolIndex(stats *indexer.IndexStats, symbolIndexPath string, loadFailed bool) bool {
+	if loadFailed {
+		return true
+	}
+	if !fileExists(symbolIndexPath) {
+		return true
+	}
+	return hasIndexChanges(stats)
+}
+
+func shouldRebuildRPGGraph(stats *indexer.IndexStats, rpgIndexPath string, enabled bool, loadFailed bool) bool {
+	if !enabled {
+		return false
+	}
+	if loadFailed {
+		return true
+	}
+	if !fileExists(rpgIndexPath) {
+		return true
+	}
+	return hasIndexChanges(stats)
+}
+
 //nolint:unused // Retained for upcoming watch-loop refactor across fg/bg modes.
 func runWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.GOBSymbolStore, w *watcher.Watcher, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, tracedLanguages []string, projectRoot string, cfg *config.Config, isBackgroundChild bool) error {
 	// Handle signals
@@ -462,7 +497,7 @@ func runWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.
 	}
 }
 
-func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, tracedLanguages []string, lastIndexTime time.Time, isBackgroundChild bool) (*indexer.IndexStats, error) {
+func runInitialScan(ctx context.Context, idx *indexer.Indexer, _ *indexer.Scanner, _ *trace.RegexExtractor, _ *trace.GOBSymbolStore, _ []string, _ time.Time, isBackgroundChild bool) (*indexer.IndexStats, error) {
 	// Initial scan with progress
 	if !isBackgroundChild {
 		fmt.Println("\nPerforming initial scan...")
@@ -499,6 +534,10 @@ func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.
 			stats.FilesIndexed, stats.ChunksCreated, stats.FilesRemoved, stats.FilesSkipped, stats.Duration.Round(time.Millisecond))
 	}
 
+	return stats, nil
+}
+
+func rebuildSymbolIndex(ctx context.Context, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, tracedLanguages []string, lastIndexTime time.Time, isBackgroundChild bool) {
 	// Index symbols for traced languages
 	if !isBackgroundChild {
 		fmt.Println("Building symbol index...")
@@ -509,7 +548,7 @@ func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.
 	files, _, err := scanner.ScanMetadata()
 	if err != nil {
 		log.Printf("Warning: failed to scan files for symbol index: %v", err)
-		return stats, nil
+		return
 	}
 
 	for _, file := range files {
@@ -558,8 +597,6 @@ func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.
 	} else {
 		log.Printf("Symbol index built: %d symbols extracted", symbolCount)
 	}
-
-	return stats, nil
 }
 
 // discoverWorktreesForWatch discovers linked worktrees and auto-initializes them.
@@ -646,7 +683,9 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 
 	// Initialize symbol store and extractor
 	symbolStore := trace.NewGOBSymbolStore(config.GetSymbolIndexPath(projectRoot))
+	symbolStoreLoadFailed := false
 	if err := symbolStore.Load(ctx); err != nil {
+		symbolStoreLoadFailed = true
 		log.Printf("Warning: failed to load symbol index for %s: %v", projectRoot, err)
 	}
 	defer symbolStore.Close()
@@ -656,9 +695,11 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 	// Initialize RPG if enabled.
 	var rpgIndexer *rpg.RPGIndexer
 	var rpgStore rpg.RPGStore
+	rpgStoreLoadFailed := false
 	if cfg.RPG.Enabled {
 		rpgStore = rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
 		if err := rpgStore.Load(ctx); err != nil {
+			rpgStoreLoadFailed = true
 			log.Printf("Warning: failed to load RPG index for %s: %v", projectRoot, err)
 		}
 
@@ -701,7 +742,7 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 		tracedLanguages = []string{".go", ".js", ".ts", ".jsx", ".tsx", ".py", ".php", ".java", ".cs"}
 	}
 
-	// Run initial scan and build symbol index.
+	// Run initial scan.
 	// Worktree/background executions pass isBackgroundChild=true to keep output non-interactive.
 	stats, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, cfg.Watch.LastIndexTime, isBackgroundChild)
 	if err != nil {
@@ -715,7 +756,17 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 		}
 	}
 
-	if rpgIndexer != nil {
+	symbolIndexPath := config.GetSymbolIndexPath(projectRoot)
+	if shouldRebuildSymbolIndex(stats, symbolIndexPath, symbolStoreLoadFailed) {
+		rebuildSymbolIndex(ctx, scanner, extractor, symbolStore, tracedLanguages, cfg.Watch.LastIndexTime, isBackgroundChild)
+	} else if !isBackgroundChild {
+		fmt.Printf("Symbol index unchanged for %s, skipping rebuild\n", projectRoot)
+	} else {
+		log.Printf("Symbol index unchanged for %s, skipping rebuild", projectRoot)
+	}
+
+	rpgIndexPath := config.GetRPGIndexPath(projectRoot)
+	if shouldRebuildRPGGraph(stats, rpgIndexPath, rpgIndexer != nil, rpgStoreLoadFailed) {
 		start := time.Now()
 		if !isBackgroundChild {
 			fmt.Println("Building RPG graph...")
@@ -734,15 +785,19 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 		if err != nil {
 			log.Printf("Warning: failed to build RPG graph for %s: %v", projectRoot, err)
 		} else {
-			stats := rpgStore.GetGraph().Stats()
+			rpgStats := rpgStore.GetGraph().Stats()
 			if !isBackgroundChild {
 				fmt.Printf("RPG graph built: %d nodes, %d edges (took %s)\n",
-					stats.TotalNodes, stats.TotalEdges, time.Since(start).Round(time.Millisecond))
+					rpgStats.TotalNodes, rpgStats.TotalEdges, time.Since(start).Round(time.Millisecond))
 			} else {
 				log.Printf("RPG graph built for %s: %d nodes, %d edges (took %s)",
-					projectRoot, stats.TotalNodes, stats.TotalEdges, time.Since(start).Round(time.Millisecond))
+					projectRoot, rpgStats.TotalNodes, rpgStats.TotalEdges, time.Since(start).Round(time.Millisecond))
 			}
 		}
+	} else if rpgIndexer != nil && !isBackgroundChild {
+		fmt.Printf("RPG graph unchanged for %s, skipping rebuild\n", projectRoot)
+	} else if rpgIndexer != nil {
+		log.Printf("RPG graph unchanged for %s, skipping rebuild", projectRoot)
 	}
 
 	if err := st.Persist(ctx); err != nil {
