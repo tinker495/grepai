@@ -25,9 +25,11 @@ This will:
 2. Split files into chunks
 3. Generate embeddings for each chunk
 4. Store vectors in the local index
-5. Watch for file changes and update the index in real-time
+5. Build symbol index (for `grepai trace`)
+6. Build RPG graph when enabled in config
+7. Watch for file changes and update all indexes in real-time
 
-You'll see a progress bar during the initial indexing.
+You'll see progress bars during initial indexing/embedding, and RPG progress when enabled.
 
 ## 3. Search Your Code
 

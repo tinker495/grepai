@@ -33,6 +33,16 @@ The deep-explore subagent provides:
 | Call Graph | `grepai trace` | Understand function relationships |
 | Standard Tools | Grep, Glob, Read | Available as fallback |
 
+## Prerequisite
+
+Before using the subagent heavily, build the index:
+
+```bash
+grepai init
+grepai watch --background
+grepai watch --status
+```
+
 ## Usage
 
 Claude Code automatically selects the deep-explore agent when:
@@ -76,22 +86,23 @@ You are a specialized code exploration agent with access to grepai.
 ### Primary Tools
 
 Use `grepai search` for semantic code search:
-- grepai search "authentication flow" --json
-- grepai search "error handling" --toon --compact
+- grepai search "authentication flow" --json --compact
+- grepai search "error handling" --json --compact
+- grepai search "request flow" --distance-from-symbol "HandleRequest" --sort combined --distance-weight 0.5 --json --compact
 
 Use `grepai trace` for call graph analysis:
 - grepai trace callers "Login" --json
-- grepai trace callees "HandleRequest" --toon
-- grepai trace graph "ProcessOrder" --depth 3 --toon
-
-**Note:** Use `--toon` for ~50% fewer tokens than `--json`.
+- grepai trace callees "HandleRequest" --json
+- grepai trace graph "ProcessOrder" --depth 3 --json
+- grepai trace path "file:cli/watch.go" "file:rpg/model.go" --json
 
 ### Workflow
 
-1. Start with grepai search to find relevant code
-2. Use grepai trace to understand function relationships
-3. Use Read to examine files in detail
-4. Synthesize findings into a clear summary
+1. Ensure index exists (`grepai init`, `grepai watch --background`)
+2. Start with grepai search to find relevant code
+3. Use grepai trace (`callers/callees/graph/path`) to understand relationships
+4. Use Read to examine files in detail
+5. Synthesize findings into a clear summary
 ```
 
 ## Troubleshooting
@@ -106,4 +117,4 @@ Use `grepai trace` for call graph analysis:
 
 - Ensure grepai is in your PATH
 - Verify the index is built: `grepai status`
-- Run `grepai watch` to build/update the index
+- Run `grepai watch --background` then `grepai watch --status`

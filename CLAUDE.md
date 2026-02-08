@@ -122,17 +122,33 @@ Only use Grep/Glob when you need:
 
 If grepai fails (not running, index unavailable, or errors), fall back to standard Grep/Glob tools.
 
+### Index Prerequisite
+
+Before semantic search/trace:
+
+```bash
+# one-time per project
+grepai init
+
+# build and keep index fresh
+grepai watch --background
+grepai watch --status
+```
+
 ### Usage
 
 ```bash
-# ALWAYS use English queries for best results (embedding model is English-trained)
-grepai search "user authentication flow"
-grepai search "error handling middleware"
-grepai search "database connection pool"
-grepai search "API request validation"
+# ALWAYS use English queries for best results
+grepai search "user authentication flow" --json --compact
+grepai search "error handling middleware" --json --compact
+grepai search "database connection pool" --json --compact
+grepai search "API request validation" --json --compact
 
-# JSON output for AI agents (--compact saves ~80% tokens by omitting content)
-grepai search "authentication flow" --json --compact
+# cross-project search (workspace mode)
+grepai search "shared auth middleware" --workspace backend --project api --project worker --json --compact
+
+# RPG distance-aware search (single project mode only)
+grepai search "request validation path" --distance-from-symbol "HandleRequest" --sort combined --distance-weight 0.5 --json --compact
 ```
 
 ### Query Tips
@@ -148,6 +164,7 @@ Use `grepai trace` to understand function relationships:
 - Finding all callers of a function before modifying it
 - Understanding what functions are called by a given function
 - Visualizing the complete call graph around a symbol
+- Finding shortest RPG paths between symbols/files
 
 #### Trace Commands
 
@@ -162,12 +179,25 @@ grepai trace callees "ProcessOrder" --json
 
 # Build complete call graph (callers + callees)
 grepai trace graph "ValidateToken" --depth 3 --json
+
+# Find shortest path between two RPG nodes
+grepai trace path "file:cli/watch.go" "file:rpg/model.go" --metric cost --direction both --json
 ```
 
 ### Workflow
 
-1. Start with `grepai search` to find relevant code
-2. Use `grepai trace` to understand function relationships
-3. Use `Read` tool to examine files from results
-4. Only use Grep for exact string searches if needed
+1. Ensure index exists (`grepai init`, `grepai watch --background`)
+2. Start with `grepai search` to find relevant code
+3. Use `grepai trace` (`callers/callees/graph/path`) to understand relationships
+4. Use `Read` tool to examine files from results
+5. Only use Grep for exact string searches if needed
 
+### Runtime Verification
+
+Use these checks when behavior is unclear:
+
+```bash
+grepai status
+grepai watch --status
+grepai trace path "file:cli/watch.go" "file:rpg/model.go" --json
+```

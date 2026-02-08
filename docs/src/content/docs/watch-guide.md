@@ -13,6 +13,8 @@ description: Real-time index updates with grepai watch
 - **Real-time updates**: Monitors filesystem for changes
 - **Incremental sync**: Only re-indexes modified files
 - **Symbol extraction**: Builds call graph data for `grepai trace`
+- **RPG graph sync**: Builds and updates RPG graph when enabled
+- **RPG visibility**: Explicit startup status + progress rendering
 - **Debounced processing**: Batches rapid changes efficiently
 
 ### Quick Start
@@ -31,12 +33,16 @@ Output:
 Starting grepai watch in /path/to/project
 Provider: ollama (nomic-embed-text)
 Backend: gob
+RPG: enabled (feature_mode=local, drift_threshold=0.35)
 
 Performing initial scan...
 Indexing [================] 100% (245/245) src/auth/handler.go
 Initial scan complete: 245 files indexed, 1842 chunks created (took 45.2s)
 Building symbol index...
 Symbol index built: 3421 symbols extracted
+Building RPG graph...
+RPG CHUNKS    [████████████████████] 100% (245/245) src/auth/handler.go
+RPG graph built: 5210 nodes, 11384 edges (took 2.1s)
 
 Watching for changes... (Press Ctrl+C to stop)
 ```
@@ -111,6 +117,8 @@ When files change, the watcher logs updates:
 [MODIFY] src/auth/handler.go
 Indexed src/auth/handler.go (4 chunks)
 Extracted 12 symbols from src/auth/handler.go
+RPG updated for src/auth/handler.go (modify)
+RPG chunk links updated for src/auth/handler.go (4 chunks)
 
 [CREATE] src/api/routes.go
 Indexed src/api/routes.go (3 chunks)
@@ -118,6 +126,7 @@ Extracted 8 symbols from src/api/routes.go
 
 [DELETE] src/old/deprecated.go
 Removed src/old/deprecated.go from index
+RPG updated for deleted src/old/deprecated.go
 ```
 
 ### Symbol Indexing
@@ -129,6 +138,16 @@ The watcher also builds a symbol index for call graph analysis:
 - **Used by**: `grepai trace` for call graph analysis
 
 See [Call Graph Analysis](/grepai/trace/) for more details.
+
+### RPG Graph Visibility
+
+When RPG is enabled in config:
+
+- Startup explicitly shows `RPG: enabled ...` (or `RPG: disabled`)
+- Foreground mode renders RPG build progress right after symbol indexing
+- File events log RPG incremental updates (`RPG updated ...`)
+
+This makes it easier to confirm semantic graph updates while watching.
 
 ### Configuration
 

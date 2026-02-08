@@ -38,6 +38,17 @@ type RPGIndexerConfig struct {
 	FeatureGroupStrategy string
 }
 
+// BuildProgress reports RPG full-build progress for UI/log rendering.
+type BuildProgress struct {
+	Stage   string // prepare, symbols, calls, imports, semantic, chunks, hierarchy, persist
+	Current int
+	Total   int
+	Message string
+}
+
+// BuildProgressFunc is called during BuildFullWithProgress.
+type BuildProgressFunc func(BuildProgress)
+
 // NewRPGIndexer creates a new RPG indexer instance.
 func NewRPGIndexer(rpgStore RPGStore, extractor FeatureExtractor, projectRoot string, cfg RPGIndexerConfig) *RPGIndexer {
 	graph := rpgStore.GetGraph()
@@ -54,11 +65,29 @@ func NewRPGIndexer(rpgStore RPGStore, extractor FeatureExtractor, projectRoot st
 	}
 }
 
+func emitBuildProgress(cb BuildProgressFunc, stage string, current, total int, message string) {
+	if cb == nil {
+		return
+	}
+	cb(BuildProgress{
+		Stage:   stage,
+		Current: current,
+		Total:   total,
+		Message: message,
+	})
+}
+
 // BuildFull performs a complete rebuild of the RPG graph from scratch.
 func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolStore, vectorStore store.VectorStore) error {
+	return idx.BuildFullWithProgress(ctx, symbolStore, vectorStore, nil)
+}
+
+// BuildFullWithProgress performs a complete rebuild and emits progress updates.
+func (idx *RPGIndexer) BuildFullWithProgress(ctx context.Context, symbolStore trace.SymbolStore, vectorStore store.VectorStore, progress BuildProgressFunc) error {
 	graph := idx.store.GetGraph()
 
 	// Clear existing graph data in-place (not reassigning the pointer)
+	emitBuildProgress(progress, "prepare", 1, 1, "resetting graph")
 	graph.Nodes = make(map[string]*Node)
 	graph.Edges = make([]*Edge, 0)
 	graph.RebuildIndexes()
@@ -68,6 +97,7 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 	if err != nil {
 		return fmt.Errorf("failed to list documents: %w", err)
 	}
+	emitBuildProgress(progress, "symbols", 0, len(docs), "building file/symbol nodes")
 
 	// Track which files we've seen
 	filesProcessed := make(map[string]bool)
@@ -123,18 +153,20 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 				UpdatedAt: time.Now(),
 			})
 		}
+		emitBuildProgress(progress, "symbols", len(filesProcessed), len(docs), filePath)
 	}
 
 	// Step 2: Wire invocation edges from call graph
 	callEdges, callErr := symbolStore.GetCallEdges(ctx)
 	if callErr == nil {
+		emitBuildProgress(progress, "calls", 0, len(callEdges), "wiring invocation edges")
 		// Build symbol-by-name index for fast callee resolution
 		symbolByName := make(map[string][]*Node)
 		for _, n := range graph.GetNodesByKind(KindSymbol) {
 			symbolByName[n.SymbolName] = append(symbolByName[n.SymbolName], n)
 		}
 
-		for _, ce := range callEdges {
+		for i, ce := range callEdges {
 			callerID := findSymbolNodeID(graph, ce.Caller, ce.File, ce.Line)
 			// For callee, look up in symbol index
 			calleeNodes := symbolByName[ce.Callee]
@@ -168,14 +200,20 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 					UpdatedAt: time.Now(),
 				})
 			}
+			emitBuildProgress(progress, "calls", i+1, len(callEdges), ce.Caller+" -> "+ce.Callee)
 		}
+	} else {
+		emitBuildProgress(progress, "calls", 1, 1, "call edge extraction unavailable")
 	}
 
 	// Step 3: Wire import edges by analyzing cross-file invocations.
 	// When a symbol in file A invokes a symbol in file B, file A imports file B.
+	totalImportCandidates := len(graph.Edges)
+	emitBuildProgress(progress, "imports", 0, totalImportCandidates, "wiring import edges")
 	importsSeen := make(map[string]bool) // "fileA->fileB" dedup key
-	for _, e := range graph.Edges {
+	for i, e := range graph.Edges {
 		if e.Type != EdgeInvokes {
+			emitBuildProgress(progress, "imports", i+1, totalImportCandidates, "")
 			continue
 		}
 		callerNode := graph.GetNode(e.From)
@@ -203,35 +241,44 @@ func (idx *RPGIndexer) BuildFull(ctx context.Context, symbolStore trace.SymbolSt
 				UpdatedAt: time.Now(),
 			})
 		}
+		emitBuildProgress(progress, "imports", i+1, totalImportCandidates, callerNode.Path+" -> "+calleeNode.Path)
 	}
 
 	// Step 3b: Wire semantic similarity edges from feature label overlap.
 	// Symbols in different files with similar features are likely related.
+	emitBuildProgress(progress, "semantic", 1, 2, "wiring semantic similarity edges")
 	idx.wireFeatureSimilarity(graph)
 
 	// Step 3c: Wire co-caller affinity edges.
 	// Symbols frequently called together by the same callers are likely related.
+	emitBuildProgress(progress, "semantic", 2, 2, "wiring co-caller affinity edges")
 	idx.wireCoCallerAffinity(graph)
 
 	// Step 4: Link vector chunks to symbols
-	for _, filePath := range docs {
+	emitBuildProgress(progress, "chunks", 0, len(docs), "linking chunks")
+	for i, filePath := range docs {
 		chunks, err := vectorStore.GetChunksForFile(ctx, filePath)
 		if err != nil {
+			emitBuildProgress(progress, "chunks", i+1, len(docs), filePath)
 			continue
 		}
 
 		if err := idx.linkChunksToSymbols(graph, filePath, chunks); err != nil {
 			return fmt.Errorf("failed to link chunks for file %s: %w", filePath, err)
 		}
+		emitBuildProgress(progress, "chunks", i+1, len(docs), filePath)
 	}
 
 	// Step 5: Build hierarchy
+	emitBuildProgress(progress, "hierarchy", 1, 2, "building feature hierarchy")
 	idx.hierarchy.BuildHierarchy()
 
 	// Step 5b: Enrich hierarchy with semantic labels
+	emitBuildProgress(progress, "hierarchy", 2, 2, "enriching hierarchy labels")
 	idx.hierarchy.EnrichLabels()
 
 	// Step 6: Persist
+	emitBuildProgress(progress, "persist", 1, 1, "persisting RPG index")
 	if err := idx.store.Persist(ctx); err != nil {
 		return fmt.Errorf("failed to persist RPG store: %w", err)
 	}
