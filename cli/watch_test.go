@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/yoanbernabeu/grepai/daemon"
+	"github.com/yoanbernabeu/grepai/indexer"
 )
 
 func skipIfWindows(t *testing.T) {
@@ -287,5 +288,63 @@ func TestStopWatchDaemon_WaitForShutdown(t *testing.T) {
 		if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
 			t.Error("PID file was not removed after stop")
 		}
+	}
+}
+
+func TestShouldRebuildSymbolIndex(t *testing.T) {
+	tmpDir := t.TempDir()
+	symbolIndexPath := filepath.Join(tmpDir, "symbols.gob")
+
+	unchanged := &indexer.IndexStats{}
+	if !shouldRebuildSymbolIndex(unchanged, symbolIndexPath, false) {
+		t.Fatal("expected rebuild when symbol index file is missing")
+	}
+
+	if err := os.WriteFile(symbolIndexPath, []byte("ok"), 0644); err != nil {
+		t.Fatalf("failed to create symbol index file: %v", err)
+	}
+
+	if shouldRebuildSymbolIndex(unchanged, symbolIndexPath, false) {
+		t.Fatal("expected no rebuild when index unchanged and symbol index exists")
+	}
+
+	changed := &indexer.IndexStats{FilesIndexed: 1}
+	if !shouldRebuildSymbolIndex(changed, symbolIndexPath, false) {
+		t.Fatal("expected rebuild when files were indexed")
+	}
+
+	if !shouldRebuildSymbolIndex(unchanged, symbolIndexPath, true) {
+		t.Fatal("expected rebuild when symbol store load failed")
+	}
+}
+
+func TestShouldRebuildRPGGraph(t *testing.T) {
+	tmpDir := t.TempDir()
+	rpgIndexPath := filepath.Join(tmpDir, "rpg.gob")
+
+	unchanged := &indexer.IndexStats{}
+	if shouldRebuildRPGGraph(unchanged, rpgIndexPath, false, false) {
+		t.Fatal("expected no rebuild when RPG is disabled")
+	}
+
+	if !shouldRebuildRPGGraph(unchanged, rpgIndexPath, true, false) {
+		t.Fatal("expected rebuild when RPG index file is missing")
+	}
+
+	if err := os.WriteFile(rpgIndexPath, []byte("ok"), 0644); err != nil {
+		t.Fatalf("failed to create RPG index file: %v", err)
+	}
+
+	if shouldRebuildRPGGraph(unchanged, rpgIndexPath, true, false) {
+		t.Fatal("expected no rebuild when index unchanged and RPG index exists")
+	}
+
+	changed := &indexer.IndexStats{FilesRemoved: 1}
+	if !shouldRebuildRPGGraph(changed, rpgIndexPath, true, false) {
+		t.Fatal("expected rebuild when files were removed")
+	}
+
+	if !shouldRebuildRPGGraph(unchanged, rpgIndexPath, true, true) {
+		t.Fatal("expected rebuild when RPG store load failed")
 	}
 }

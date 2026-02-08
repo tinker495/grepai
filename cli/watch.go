@@ -323,6 +323,41 @@ func initializeStore(ctx context.Context, cfg *config.Config, projectRoot string
 
 const configWriteThrottle = 30 * time.Second
 
+func hasIndexChanges(stats *indexer.IndexStats) bool {
+	if stats == nil {
+		return false
+	}
+	return stats.FilesIndexed > 0 || stats.FilesRemoved > 0 || stats.ChunksCreated > 0
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
+}
+
+func shouldRebuildSymbolIndex(stats *indexer.IndexStats, symbolIndexPath string, loadFailed bool) bool {
+	if loadFailed {
+		return true
+	}
+	if !fileExists(symbolIndexPath) {
+		return true
+	}
+	return hasIndexChanges(stats)
+}
+
+func shouldRebuildRPGGraph(stats *indexer.IndexStats, rpgIndexPath string, enabled bool, loadFailed bool) bool {
+	if !enabled {
+		return false
+	}
+	if loadFailed {
+		return true
+	}
+	if !fileExists(rpgIndexPath) {
+		return true
+	}
+	return hasIndexChanges(stats)
+}
+
 func runWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.GOBSymbolStore, w *watcher.Watcher, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, tracedLanguages []string, projectRoot string, cfg *config.Config, rpgIndexer *rpg.RPGIndexer, rpgStore rpg.RPGStore, isBackgroundChild bool) error {
 	// Handle signals
 	sigChan := make(chan os.Signal, 1)
@@ -382,7 +417,7 @@ func runWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.
 	}
 }
 
-func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, tracedLanguages []string, isBackgroundChild bool) (*indexer.IndexStats, error) {
+func runInitialScan(ctx context.Context, idx *indexer.Indexer, isBackgroundChild bool) (*indexer.IndexStats, error) {
 	// Initial scan with progress
 	if !isBackgroundChild {
 		fmt.Println("\nPerforming initial scan...")
@@ -419,6 +454,10 @@ func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.
 			stats.FilesIndexed, stats.ChunksCreated, stats.FilesRemoved, stats.FilesSkipped, stats.Duration.Round(time.Millisecond))
 	}
 
+	return stats, nil
+}
+
+func rebuildSymbolIndex(ctx context.Context, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, tracedLanguages []string, isBackgroundChild bool) {
 	// Index symbols for traced languages
 	if !isBackgroundChild {
 		fmt.Println("Building symbol index...")
@@ -450,8 +489,6 @@ func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.
 	} else {
 		log.Printf("Symbol index built: %d symbols extracted", symbolCount)
 	}
-
-	return stats, nil
 }
 
 func runWatchForeground() error {
@@ -553,7 +590,9 @@ func runWatchForeground() error {
 
 	// Initialize symbol store and extractor
 	symbolStore := trace.NewGOBSymbolStore(config.GetSymbolIndexPath(projectRoot))
+	symbolStoreLoadFailed := false
 	if err := symbolStore.Load(ctx); err != nil {
+		symbolStoreLoadFailed = true
 		log.Printf("Warning: failed to load symbol index: %v", err)
 	}
 	defer symbolStore.Close()
@@ -563,9 +602,11 @@ func runWatchForeground() error {
 	// Initialize RPG if enabled
 	var rpgIndexer *rpg.RPGIndexer
 	var rpgStore rpg.RPGStore
+	rpgStoreLoadFailed := false
 	if cfg.RPG.Enabled {
 		rpgStore = rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
 		if err := rpgStore.Load(ctx); err != nil {
+			rpgStoreLoadFailed = true
 			log.Printf("Warning: failed to load RPG index: %v", err)
 		}
 
@@ -610,8 +651,8 @@ func runWatchForeground() error {
 		tracedLanguages = []string{".go", ".js", ".ts", ".jsx", ".tsx", ".py", ".php", ".java", ".cs"}
 	}
 
-	// Run initial scan and build symbol index
-	stats, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, isBackgroundChild)
+	// Run initial scan
+	stats, err := runInitialScan(ctx, idx, isBackgroundChild)
 	if err != nil {
 		return err
 	}
@@ -624,8 +665,18 @@ func runWatchForeground() error {
 		}
 	}
 
-	// Build RPG graph if enabled
-	if rpgIndexer != nil {
+	symbolIndexPath := config.GetSymbolIndexPath(projectRoot)
+	if shouldRebuildSymbolIndex(stats, symbolIndexPath, symbolStoreLoadFailed) {
+		rebuildSymbolIndex(ctx, scanner, extractor, symbolStore, tracedLanguages, isBackgroundChild)
+	} else if !isBackgroundChild {
+		fmt.Println("Symbol index unchanged, skipping rebuild")
+	} else {
+		log.Println("Symbol index unchanged, skipping rebuild")
+	}
+
+	// Build RPG graph if enabled and needed
+	rpgIndexPath := config.GetRPGIndexPath(projectRoot)
+	if shouldRebuildRPGGraph(stats, rpgIndexPath, rpgIndexer != nil, rpgStoreLoadFailed) {
 		start := time.Now()
 		if !isBackgroundChild {
 			fmt.Println("Building RPG graph...")
@@ -653,6 +704,10 @@ func runWatchForeground() error {
 					rpgStats.TotalNodes, rpgStats.TotalEdges, time.Since(start).Round(time.Millisecond))
 			}
 		}
+	} else if rpgIndexer != nil && !isBackgroundChild {
+		fmt.Println("RPG graph unchanged, skipping rebuild")
+	} else if rpgIndexer != nil {
+		log.Println("RPG graph unchanged, skipping rebuild")
 	}
 
 	// Save index after initial scan
@@ -700,6 +755,17 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 		}
 		if fileInfo == nil {
 			return // File was skipped (binary, too large, etc.)
+		}
+
+		// Skip noisy modify events when content hash is unchanged.
+		if event.Type == watcher.EventModify && vectorStore != nil {
+			doc, err := vectorStore.GetDocument(ctx, fileInfo.Path)
+			if err != nil {
+				log.Printf("Warning: failed to check current document hash for %s: %v", event.Path, err)
+			} else if doc != nil && doc.Hash == fileInfo.Hash {
+				log.Printf("No content change detected for %s, skipping reindex/symbol/RPG update", event.Path)
+				return
+			}
 		}
 
 		chunks, err := idx.IndexFile(ctx, *fileInfo)
