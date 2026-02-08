@@ -206,14 +206,7 @@ func (m model) viewStats() string {
 		// Edge type breakdown
 		if len(m.rpgStats.EdgesByType) > 0 {
 			sb.WriteString(normalStyle.Render("  Edge types:     "))
-			first := true
-			for et, count := range m.rpgStats.EdgesByType {
-				if !first {
-					sb.WriteString(", ")
-				}
-				sb.WriteString(fmt.Sprintf("%s: %d", et, count))
-				first = false
-			}
+			sb.WriteString(formatEdgeTypeSummary(m.rpgStats.EdgesByType))
 			sb.WriteString("\n")
 		}
 	}
@@ -454,10 +447,73 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		rpgStats: rpgStatsPtr,
 	}
 
+	// Non-interactive environments (CI/pipes) cannot run Bubble Tea TUI.
+	if !isInteractiveTerminal() {
+		fmt.Println(renderStatusSummary(stats, cfg, rpgStatsPtr))
+		return nil
+	}
+
 	// Run TUI
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err = p.Run()
 	return err
+}
+
+func isInteractiveTerminal() bool {
+	return isCharDevice(os.Stdin) && isCharDevice(os.Stdout)
+}
+
+func isCharDevice(f *os.File) bool {
+	if f == nil {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func renderStatusSummary(stats *store.IndexStats, cfg *config.Config, rpgStats *rpg.GraphStats) string {
+	var sb strings.Builder
+
+	sb.WriteString("grepai index status\n")
+	sb.WriteString(fmt.Sprintf("Files indexed:    %d\n", stats.TotalFiles))
+	sb.WriteString(fmt.Sprintf("Total chunks:     %d\n", stats.TotalChunks))
+	sb.WriteString(fmt.Sprintf("Index size:       %s\n", formatBytes(stats.IndexSize)))
+
+	sb.WriteString("Last updated:     ")
+	if stats.LastUpdated.IsZero() {
+		sb.WriteString("Never\n")
+	} else {
+		sb.WriteString(stats.LastUpdated.Format("2006-01-02 15:04:05"))
+		sb.WriteString("\n")
+	}
+
+	sb.WriteString(fmt.Sprintf("Provider:         %s (%s)\n", cfg.Embedder.Provider, cfg.Embedder.Model))
+
+	if rpgStats != nil {
+		sb.WriteString(fmt.Sprintf("RPG Graph:        %d nodes, %d edges\n", rpgStats.TotalNodes, rpgStats.TotalEdges))
+		if len(rpgStats.EdgesByType) > 0 {
+			sb.WriteString(fmt.Sprintf("  Edge types:     %s\n", formatEdgeTypeSummary(rpgStats.EdgesByType)))
+		}
+	}
+
+	return strings.TrimSuffix(sb.String(), "\n")
+}
+
+func formatEdgeTypeSummary(edgesByType map[rpg.EdgeType]int) string {
+	keys := make([]string, 0, len(edgesByType))
+	for edgeType := range edgesByType {
+		keys = append(keys, string(edgeType))
+	}
+	sort.Strings(keys)
+
+	parts := make([]string, 0, len(keys))
+	for _, edgeType := range keys {
+		parts = append(parts, fmt.Sprintf("%s: %d", edgeType, edgesByType[rpg.EdgeType(edgeType)]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 func formatBytes(b int64) string {
