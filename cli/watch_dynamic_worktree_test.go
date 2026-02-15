@@ -19,12 +19,13 @@ type watchLifecycleEvent struct {
 
 func waitForWatchLifecycleState(t *testing.T, ch <-chan watchLifecycleEvent, projectRoot, state string, timeout time.Duration) watchLifecycleEvent {
 	t.Helper()
+	wantProjectRoot := canonicalPath(projectRoot)
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
 	for {
 		select {
 		case ev := <-ch:
-			if ev.projectRoot == projectRoot && ev.state == state {
+			if canonicalPath(ev.projectRoot) == wantProjectRoot && ev.state == state {
 				return ev
 			}
 		case <-deadline.C:
@@ -63,8 +64,8 @@ func steadyWatchSessionRunner(
 }
 
 func TestDynamicWatch_AddLinkedWorktreeAfterStart(t *testing.T) {
-	mainRoot := "/tmp/main"
-	linkedRoot := "/tmp/wt-a"
+	mainRoot := canonicalPath("/tmp/main")
+	linkedRoot := canonicalPath("/tmp/wt-a")
 
 	var mu sync.Mutex
 	linked := []string{}
@@ -106,8 +107,8 @@ func TestDynamicWatch_AddLinkedWorktreeAfterStart(t *testing.T) {
 }
 
 func TestDynamicWatch_RemoveLinkedWorktreeDuringRun(t *testing.T) {
-	mainRoot := "/tmp/main"
-	linkedRoot := "/tmp/wt-b"
+	mainRoot := canonicalPath("/tmp/main")
+	linkedRoot := canonicalPath("/tmp/wt-b")
 
 	var mu sync.Mutex
 	linked := []string{linkedRoot}
@@ -173,9 +174,9 @@ func TestDynamicWatch_RemoveLinkedWorktreeDuringRun(t *testing.T) {
 }
 
 func TestDynamicWatch_RemoveAllLinkedWorktrees(t *testing.T) {
-	mainRoot := "/tmp/main"
-	linkedA := "/tmp/wt-c"
-	linkedB := "/tmp/wt-d"
+	mainRoot := canonicalPath("/tmp/main")
+	linkedA := canonicalPath("/tmp/wt-c")
+	linkedB := canonicalPath("/tmp/wt-d")
 
 	var mu sync.Mutex
 	linked := []string{linkedA, linkedB}
@@ -218,8 +219,8 @@ func TestDynamicWatch_RemoveAllLinkedWorktrees(t *testing.T) {
 }
 
 func TestDynamicWatch_LinkedFailureIsIsolatedWithRetry(t *testing.T) {
-	mainRoot := "/tmp/main"
-	linkedRoot := "/tmp/wt-e"
+	mainRoot := canonicalPath("/tmp/main")
+	linkedRoot := canonicalPath("/tmp/wt-e")
 
 	discover := func(string) []string {
 		return []string{linkedRoot}
@@ -299,8 +300,8 @@ func TestDynamicWatch_LinkedFailureIsIsolatedWithRetry(t *testing.T) {
 }
 
 func TestDynamicWatch_MainFailureStopsAll(t *testing.T) {
-	mainRoot := "/tmp/main"
-	linkedRoot := "/tmp/wt-f"
+	mainRoot := canonicalPath("/tmp/main")
+	linkedRoot := canonicalPath("/tmp/wt-f")
 	linkedStoppedCh := make(chan struct{}, 1)
 
 	runner := func(
@@ -348,8 +349,8 @@ func TestDynamicWatch_MainFailureStopsAll(t *testing.T) {
 }
 
 func TestDynamicWatch_InitialReadySelector_MainOnly(t *testing.T) {
-	mainRoot := "/tmp/main"
-	linkedRoot := "/tmp/wt-g"
+	mainRoot := canonicalPath("/tmp/main")
+	linkedRoot := canonicalPath("/tmp/wt-g")
 
 	runner := func(
 		ctx context.Context,
@@ -406,8 +407,8 @@ func TestDynamicWatch_InitialReadySelector_MainOnly(t *testing.T) {
 }
 
 func TestDynamicWatch_ContextCancelRemainsGracefulUnderRace(t *testing.T) {
-	mainRoot := "/tmp/main"
-	linkedRoot := "/tmp/wt-h"
+	mainRoot := canonicalPath("/tmp/main")
+	linkedRoot := canonicalPath("/tmp/wt-h")
 
 	for i := 0; i < 120; i++ {
 		lifecycleCh := make(chan watchLifecycleEvent, 64)
