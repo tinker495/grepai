@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/yoanbernabeu/grepai/embedder"
+	"github.com/yoanbernabeu/grepai/indexer"
 )
 
 type watchLifecycleEvent struct {
@@ -57,6 +58,8 @@ func steadyWatchSessionRunner(
 	_ bool,
 	onReady func(),
 	_ watchSessionEventObserver,
+	_ func(current, total int, file string),
+	_ func(info indexer.BatchProgressInfo),
 ) error {
 	onReady()
 	<-ctx.Done()
@@ -126,6 +129,8 @@ func TestDynamicWatch_RemoveLinkedWorktreeDuringRun(t *testing.T) {
 		_ bool,
 		onReady func(),
 		_ watchSessionEventObserver,
+		_ func(current, total int, file string),
+		_ func(info indexer.BatchProgressInfo),
 	) error {
 		onReady()
 		<-ctx.Done()
@@ -235,6 +240,8 @@ func TestDynamicWatch_LinkedFailureIsIsolatedWithRetry(t *testing.T) {
 		_ bool,
 		onReady func(),
 		_ watchSessionEventObserver,
+		_ func(current, total int, file string),
+		_ func(info indexer.BatchProgressInfo),
 	) error {
 		if projectRoot == mainRoot {
 			onReady()
@@ -311,6 +318,8 @@ func TestDynamicWatch_MainFailureStopsAll(t *testing.T) {
 		_ bool,
 		onReady func(),
 		_ watchSessionEventObserver,
+		_ func(current, total int, file string),
+		_ func(info indexer.BatchProgressInfo),
 	) error {
 		if projectRoot == mainRoot {
 			onReady()
@@ -359,6 +368,8 @@ func TestDynamicWatch_InitialReadySelector_MainOnly(t *testing.T) {
 		_ bool,
 		onReady func(),
 		_ watchSessionEventObserver,
+		_ func(current, total int, file string),
+		_ func(info indexer.BatchProgressInfo),
 	) error {
 		if projectRoot == mainRoot {
 			onReady()

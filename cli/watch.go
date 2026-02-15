@@ -722,7 +722,7 @@ func runWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.
 	}
 }
 
-func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, tracedLanguages []string, lastIndexTime time.Time, isBackgroundChild bool) (*indexer.IndexStats, error) {
+func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, tracedLanguages []string, lastIndexTime time.Time, isBackgroundChild bool, onScan func(current, total int, file string), onEmbed func(info indexer.BatchProgressInfo)) (*indexer.IndexStats, error) {
 	// Initial scan with progress
 	if !isBackgroundChild {
 		fmt.Println("\nPerforming initial scan...")
@@ -735,16 +735,32 @@ func runInitialScan(ctx context.Context, idx *indexer.Indexer, scanner *indexer.
 	if !isBackgroundChild {
 		stats, err = idx.IndexAllWithBatchProgress(ctx,
 			func(info indexer.ProgressInfo) {
-				printProgress(info.Current, info.Total, info.CurrentFile)
+				if onScan != nil {
+					onScan(info.Current, info.Total, info.CurrentFile)
+				} else {
+					printProgress(info.Current, info.Total, info.CurrentFile)
+				}
 			},
 			func(info indexer.BatchProgressInfo) {
-				printBatchProgress(info)
+				if onEmbed != nil {
+					onEmbed(info)
+				} else {
+					printBatchProgress(info)
+				}
 			},
 		)
 		// Clear progress line
 		fmt.Print("\r" + strings.Repeat(" ", 80) + "\r")
 	} else {
-		stats, err = idx.IndexAllWithBatchProgress(ctx, nil, nil)
+		stats, err = idx.IndexAllWithBatchProgress(ctx, func(info indexer.ProgressInfo) {
+			if onScan != nil {
+				onScan(info.Current, info.Total, info.CurrentFile)
+			}
+		}, func(info indexer.BatchProgressInfo) {
+			if onEmbed != nil {
+				onEmbed(info)
+			}
+		})
 	}
 
 	if err != nil {
@@ -904,10 +920,10 @@ const (
 )
 
 func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder, isBackgroundChild bool, onReady func()) error {
-	return watchProjectWithEventObserver(ctx, projectRoot, emb, isBackgroundChild, onReady, nil)
+	return watchProjectWithEventObserver(ctx, projectRoot, emb, isBackgroundChild, onReady, nil, nil, nil)
 }
 
-func watchProjectWithEventObserver(ctx context.Context, projectRoot string, emb embedder.Embedder, isBackgroundChild bool, onReady func(), onEvent watchEventObserver) error {
+func watchProjectWithEventObserver(ctx context.Context, projectRoot string, emb embedder.Embedder, isBackgroundChild bool, onReady func(), onEvent watchEventObserver, onScan func(current, total int, file string), onEmbed func(info indexer.BatchProgressInfo)) error {
 	// Load configuration
 	cfg, err := config.Load(projectRoot)
 	if err != nil {
@@ -993,7 +1009,9 @@ func watchProjectWithEventObserver(ctx context.Context, projectRoot string, emb 
 
 	// Run initial scan and build symbol index.
 	// In multi-worktree mode callers pass isBackgroundChild=true for non-interactive output.
-	stats, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, cfg.Watch.LastIndexTime, isBackgroundChild)
+	// Run initial scan and build symbol index.
+	// In multi-worktree mode callers pass isBackgroundChild=true for non-interactive output.
+	stats, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, cfg.Watch.LastIndexTime, isBackgroundChild, onScan, onEmbed)
 	if err != nil {
 		return err
 	}
@@ -1120,6 +1138,8 @@ type watchSupervisorSessionRunner func(
 	isBackgroundChild bool,
 	onReady func(),
 	onEvent watchSessionEventObserver,
+	onScan func(current, total int, file string),
+	onEmbed func(info indexer.BatchProgressInfo),
 ) error
 
 type watchInitialReadySelector func(mainRoot, projectRoot string) bool
@@ -1131,6 +1151,8 @@ type dynamicWatchSupervisorConfig struct {
 	sessionRunner         watchSupervisorSessionRunner
 	lifecycleObserver     watchSessionLifecycleObserver
 	eventObserver         watchSessionEventObserver
+	scanObserver          func(current, total int, file string)
+	embedObserver         func(info indexer.BatchProgressInfo)
 	scopeObserver         func(totalProjects int)
 	initialReadyObserver  func(totalProjects int)
 	initialReadySelector  watchInitialReadySelector
@@ -1180,6 +1202,18 @@ func withWatchSupervisorEventObserver(observer watchSessionEventObserver) dynami
 	}
 }
 
+func withWatchSupervisorScanObserver(observer func(current, total int, file string)) dynamicWatchSupervisorOption {
+	return func(cfg *dynamicWatchSupervisorConfig) {
+		cfg.scanObserver = observer
+	}
+}
+
+func withWatchSupervisorEmbedObserver(observer func(info indexer.BatchProgressInfo)) dynamicWatchSupervisorOption {
+	return func(cfg *dynamicWatchSupervisorConfig) {
+		cfg.embedObserver = observer
+	}
+}
+
 func withWatchSupervisorScopeObserver(observer func(totalProjects int)) dynamicWatchSupervisorOption {
 	return func(cfg *dynamicWatchSupervisorConfig) {
 		cfg.scopeObserver = observer
@@ -1222,12 +1256,14 @@ func newDynamicWatchSupervisorConfig() dynamicWatchSupervisorConfig {
 			isBackgroundChild bool,
 			onReady func(),
 			onEvent watchSessionEventObserver,
+			onScan func(current, total int, file string),
+			onEmbed func(info indexer.BatchProgressInfo),
 		) error {
 			var observer watchEventObserver
 			if onEvent != nil {
 				observer = watchEventObserver(onEvent)
 			}
-			return watchProjectWithEventObserver(ctx, projectRoot, emb, isBackgroundChild, onReady, observer)
+			return watchProjectWithEventObserver(ctx, projectRoot, emb, isBackgroundChild, onReady, observer, onScan, onEmbed)
 		},
 		reconcileInterval: worktreeReconcileInterval,
 		retryBackoff:      computeWatchSessionRetryBackoff,
@@ -1274,12 +1310,14 @@ func runDynamicWatchSupervisor(ctx context.Context, mainRoot string, emb embedde
 			isBackgroundChild bool,
 			onReady func(),
 			onEvent watchSessionEventObserver,
+			onScan func(current, total int, file string),
+			onEmbed func(info indexer.BatchProgressInfo),
 		) error {
 			var observer watchEventObserver
 			if onEvent != nil {
 				observer = watchEventObserver(onEvent)
 			}
-			return watchProjectWithEventObserver(ctx, projectRoot, emb, isBackgroundChild, onReady, observer)
+			return watchProjectWithEventObserver(ctx, projectRoot, emb, isBackgroundChild, onReady, observer, onScan, onEmbed)
 		}
 	}
 	if cfg.reconcileInterval <= 0 {
@@ -1383,6 +1421,8 @@ func runDynamicWatchSupervisor(ctx context.Context, mainRoot string, emb embedde
 				cfg.isBackgroundChild,
 				onReady,
 				cfg.eventObserver,
+				cfg.scanObserver,
+				cfg.embedObserver,
 			)
 			sessionResults <- watchSessionResult{
 				projectRoot: project,
@@ -2439,7 +2479,7 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 		tracedLanguages = []string{".go", ".js", ".ts", ".jsx", ".tsx", ".py", ".php", ".java", ".cs"}
 	}
 
-	stats, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, projectCfg.Watch.LastIndexTime, isBackgroundChild)
+	stats, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, tracedLanguages, projectCfg.Watch.LastIndexTime, isBackgroundChild, nil, nil)
 	if err != nil {
 		_ = symbolStore.Close()
 		return nil, nil, err

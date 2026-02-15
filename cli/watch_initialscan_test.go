@@ -100,7 +100,7 @@ func TestRunInitialScan_SkipsSymbolExtractionWhenContentHashMatches(t *testing.T
 	}
 
 	extractor := trace.NewRegexExtractor()
-	if _, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, []string{".go"}, time.Time{}, true); err != nil {
+	if _, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, []string{".go"}, time.Time{}, true, nil, nil); err != nil {
 		t.Fatalf("runInitialScan failed: %v", err)
 	}
 
@@ -159,7 +159,7 @@ func TestRunInitialScan_SkipsIndexedFileByLastIndexTime(t *testing.T) {
 
 	lastIndexTime := time.Now().Add(1 * time.Hour)
 	extractor := trace.NewRegexExtractor()
-	if _, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, []string{".go"}, lastIndexTime, true); err != nil {
+	if _, err := runInitialScan(ctx, idx, scanner, extractor, symbolStore, []string{".go"}, lastIndexTime, true, nil, nil); err != nil {
 		t.Fatalf("runInitialScan failed: %v", err)
 	}
 

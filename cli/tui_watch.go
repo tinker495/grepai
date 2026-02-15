@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/yoanbernabeu/grepai/config"
+	"github.com/yoanbernabeu/grepai/indexer"
 	"github.com/yoanbernabeu/grepai/watcher"
 )
 
@@ -1055,6 +1056,25 @@ func runWatchUIWorker(ctx context.Context, p *tea.Program) (err error) {
 			lastSuccess = time.Now()
 			healthMu.Unlock()
 			emitHealth()
+		}),
+		withWatchSupervisorScanObserver(func(current, total int, file string) {
+			p.Send(watchUIScanMsg{
+				current: current,
+				total:   total,
+				file:    file,
+			})
+			if total > 0 && current < total {
+				p.Send(watchUIPhaseMsg{current: 1}) // Scanning
+			}
+		}),
+		withWatchSupervisorEmbedObserver(func(info indexer.BatchProgressInfo) {
+			p.Send(watchUIEmbedMsg{
+				completed: info.CompletedChunks,
+				total:     info.TotalChunks,
+			})
+			if info.TotalChunks > 0 && info.CompletedChunks < info.TotalChunks {
+				p.Send(watchUIPhaseMsg{current: 2}) // Embedding
+			}
 		}),
 	)
 }
