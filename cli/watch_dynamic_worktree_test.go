@@ -404,3 +404,44 @@ func TestDynamicWatch_InitialReadySelector_MainOnly(t *testing.T) {
 		t.Fatalf("runDynamicWatchSupervisor() error: %v", err)
 	}
 }
+
+func TestDynamicWatch_ContextCancelRemainsGracefulUnderRace(t *testing.T) {
+	mainRoot := "/tmp/main"
+	linkedRoot := "/tmp/wt-h"
+
+	for i := 0; i < 120; i++ {
+		lifecycleCh := make(chan watchLifecycleEvent, 64)
+		ctx, cancel := context.WithCancel(context.Background())
+		errCh := make(chan error, 1)
+
+		go func() {
+			errCh <- runDynamicWatchSupervisor(
+				ctx,
+				mainRoot,
+				nil,
+				withWatchSupervisorSessionRunner(steadyWatchSessionRunner),
+				withWatchSupervisorDiscoverWorktrees(func(string) []string {
+					return []string{linkedRoot}
+				}),
+				withWatchSupervisorInitialLinkedWorktrees([]string{linkedRoot}),
+				withWatchSupervisorReconcileInterval(20*time.Millisecond),
+				withWatchSupervisorLifecycleObserver(func(projectRoot, state, note string) {
+					lifecycleCh <- watchLifecycleEvent{projectRoot: projectRoot, state: state, note: note}
+				}),
+			)
+		}()
+
+		waitForWatchLifecycleState(t, lifecycleCh, mainRoot, "running", time.Second)
+
+		cancel()
+
+		select {
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("iteration %d: expected graceful shutdown, got %v", i, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("iteration %d: timeout waiting supervisor shutdown", i)
+		}
+	}
+}

@@ -1522,6 +1522,15 @@ func runDynamicWatchSupervisor(ctx context.Context, mainRoot string, emb embedde
 				continue
 			}
 
+			shuttingDown := ctx.Err() != nil || supervisorCtx.Err() != nil
+			if shuttingDown && (result.err == nil || errors.Is(result.err, context.Canceled)) {
+				if result.projectRoot == mainRoot {
+					shutdownSessions("context canceled")
+					return nil
+				}
+				continue
+			}
+
 			if result.err == nil || errors.Is(result.err, context.Canceled) {
 				if result.projectRoot == mainRoot {
 					supervisorCancel()
