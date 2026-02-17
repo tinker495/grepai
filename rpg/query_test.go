@@ -2,6 +2,7 @@ package rpg
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -137,7 +138,7 @@ func TestSearchNode_WithScope(t *testing.T) {
 	ext := NewLocalExtractor()
 	h := NewHierarchyBuilder(g, ext)
 
-	// Add symbols in different areas
+	// Add symbols in different areas.
 	sym1 := &Node{
 		ID:         "sym1",
 		Kind:       KindSymbol,
@@ -152,9 +153,25 @@ func TestSearchNode_WithScope(t *testing.T) {
 		SymbolName: "HandleRequest",
 		Path:       "store/server.go",
 	}
+	file1 := &Node{
+		ID:      "file:cli/server.go",
+		Kind:    KindFile,
+		Path:    "cli/server.go",
+		Feature: "server",
+	}
+	file2 := &Node{
+		ID:      "file:store/server.go",
+		Kind:    KindFile,
+		Path:    "store/server.go",
+		Feature: "server",
+	}
 
+	g.AddNode(file1)
+	g.AddNode(file2)
 	g.AddNode(sym1)
 	g.AddNode(sym2)
+	g.AddEdge(&Edge{From: file1.ID, To: sym1.ID, Type: EdgeContains})
+	g.AddEdge(&Edge{From: file2.ID, To: sym2.ID, Type: EdgeContains})
 
 	// Build hierarchy
 	h.BuildHierarchy()
@@ -209,7 +226,12 @@ func TestFetchNode(t *testing.T) {
 	ext := NewLocalExtractor()
 	h := NewHierarchyBuilder(g, ext)
 
-	// Create a symbol with full hierarchy
+	file := &Node{
+		ID:      "file:cli/server.go",
+		Kind:    KindFile,
+		Path:    "cli/server.go",
+		Feature: "server",
+	}
 	sym := &Node{
 		ID:         "sym1",
 		Kind:       KindSymbol,
@@ -217,12 +239,6 @@ func TestFetchNode(t *testing.T) {
 		SymbolName: "HandleRequest",
 		Path:       "cli/server.go",
 	}
-	g.AddNode(sym)
-
-	// Build hierarchy
-	h.BuildHierarchy()
-
-	// Add a child node (another symbol in same file)
 	sym2 := &Node{
 		ID:         "sym2",
 		Kind:       KindSymbol,
@@ -230,7 +246,15 @@ func TestFetchNode(t *testing.T) {
 		SymbolName: "ValidateToken",
 		Path:       "cli/server.go",
 	}
+
+	g.AddNode(file)
+	g.AddNode(sym)
 	g.AddNode(sym2)
+	g.AddEdge(&Edge{From: file.ID, To: sym.ID, Type: EdgeContains})
+	g.AddEdge(&Edge{From: file.ID, To: sym2.ID, Type: EdgeContains})
+
+	// Build hierarchy
+	h.BuildHierarchy()
 
 	qe := NewQueryEngine(g)
 
@@ -256,15 +280,18 @@ func TestFetchNode(t *testing.T) {
 		if result.FeaturePath == "" {
 			t.Error("Feature path should not be empty")
 		}
+		if !strings.HasPrefix(result.FeaturePath, "cli/server") {
+			t.Errorf("Expected feature path to start with cli/server, got %q", result.FeaturePath)
+		}
 
 		// Should have parents (hierarchy nodes)
 		if len(result.Parents) == 0 {
 			t.Error("Expected hierarchy parents")
 		}
 
-		// Should have incoming and outgoing edges
-		if len(result.Incoming) == 0 && len(result.Outgoing) == 0 {
-			t.Error("Expected some edges")
+		// Should have incoming file containment edge.
+		if len(result.Incoming) == 0 {
+			t.Error("Expected incoming containment edge")
 		}
 	})
 
@@ -670,7 +697,7 @@ func TestFindParentID(t *testing.T) {
 	g.AddNode(node)
 	g.AddNode(parent)
 
-	g.AddEdge(&Edge{From: "node1", To: "parent1", Type: EdgeFeatureParent})
+	g.AddEdge(&Edge{From: "parent1", To: "node1", Type: EdgeFeatureParent})
 	g.AddEdge(&Edge{From: "node1", To: "other", Type: EdgeInvokes})
 
 	parentID := findParentID(g, "node1")
@@ -688,21 +715,24 @@ func TestFindParentID(t *testing.T) {
 func TestGetFeaturePath(t *testing.T) {
 	g := NewGraph()
 
-	// Create hierarchy: area "cli" → category "cli/watch" → subcategory "cli/watch/handle"
+	// Create hierarchy: area -> category -> subcategory -> file -> symbol.
 	area := &Node{ID: "area:cli", Kind: KindArea, Feature: "cli"}
 	cat := &Node{ID: "cat:cli/watch", Kind: KindCategory, Feature: "cli/watch"}
 	subcat := &Node{ID: "subcat:cli/watch/handle", Kind: KindSubcategory, Feature: "cli/watch/handle"}
+	file := &Node{ID: "file:cli/watch.go", Kind: KindFile, Feature: "watch", Path: "cli/watch.go"}
 	sym := &Node{ID: "sym:cli/watch.go:HandleEvent", Kind: KindSymbol, Feature: "handle-event", Path: "cli/watch.go", SymbolName: "HandleEvent"}
 
 	g.AddNode(area)
 	g.AddNode(cat)
 	g.AddNode(subcat)
+	g.AddNode(file)
 	g.AddNode(sym)
 
-	// Edges: cat→area, subcat→cat, sym→subcat
-	g.AddEdge(&Edge{From: cat.ID, To: area.ID, Type: EdgeContains})
-	g.AddEdge(&Edge{From: subcat.ID, To: cat.ID, Type: EdgeContains})
-	g.AddEdge(&Edge{From: sym.ID, To: subcat.ID, Type: EdgeFeatureParent})
+	// Edges: area->cat->subcat->file and file->symbol.
+	g.AddEdge(&Edge{From: area.ID, To: cat.ID, Type: EdgeFeatureParent})
+	g.AddEdge(&Edge{From: cat.ID, To: subcat.ID, Type: EdgeFeatureParent})
+	g.AddEdge(&Edge{From: subcat.ID, To: file.ID, Type: EdgeFeatureParent})
+	g.AddEdge(&Edge{From: file.ID, To: sym.ID, Type: EdgeContains})
 
 	qe := NewQueryEngine(g)
 
@@ -714,6 +744,7 @@ func TestGetFeaturePath(t *testing.T) {
 		{"area returns own feature", area.ID, "cli"},
 		{"category returns own feature", cat.ID, "cli/watch"},
 		{"subcategory returns own feature", subcat.ID, "cli/watch/handle"},
+		{"file returns parent feature path", file.ID, "cli/watch/handle"},
 		{"symbol returns parent feature path", sym.ID, "cli/watch/handle"},
 	}
 

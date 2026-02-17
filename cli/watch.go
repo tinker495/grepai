@@ -538,8 +538,8 @@ func (m *rpgRealtimeManager) Snapshot() (dirtyFiles int, dirtyPersist bool, last
 	return len(m.dirtyFiles), m.dirtyPersist, m.lastDerivedRun, m.lastPersistRun
 }
 
-func startRPGRealtimeWorkers(ctx context.Context, projectLabel string, symbolStore trace.SymbolStore, rpgIndexer *rpg.RPGIndexer, rpgStore rpg.RPGStore, watchCfg config.WatchConfig, manager *rpgRealtimeManager) {
-	if manager == nil || rpgIndexer == nil || rpgStore == nil || symbolStore == nil {
+func startRPGRealtimeWorkers(ctx context.Context, projectLabel string, symbolStore trace.SymbolStore, rpgEncoder *rpg.RPGEncoder, rpgStore rpg.RPGStore, watchCfg config.WatchConfig, manager *rpgRealtimeManager) {
+	if manager == nil || rpgEncoder == nil || rpgStore == nil || symbolStore == nil {
 		return
 	}
 
@@ -571,9 +571,9 @@ func startRPGRealtimeWorkers(ctx context.Context, projectLabel string, symbolSto
 				mode := "incremental"
 				if full {
 					mode = "full"
-					err = rpgIndexer.RefreshDerivedEdgesFull(ctx, symbolStore)
+					err = rpgEncoder.RefreshDerivedEdgesFull(ctx, symbolStore)
 				} else {
-					err = rpgIndexer.RefreshDerivedEdgesIncremental(ctx, symbolStore, changedFiles)
+					err = rpgEncoder.RefreshDerivedEdgesIncremental(ctx, symbolStore, changedFiles)
 				}
 
 				if err != nil {
@@ -899,7 +899,7 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 	extractor := trace.NewRegexExtractor()
 
 	// Initialize RPG if enabled.
-	var rpgIndexer *rpg.RPGIndexer
+	var rpgEncoder *rpg.RPGEncoder
 	var rpgStore rpg.RPGStore
 	if cfg.RPG.Enabled {
 		rpgStore = rpg.NewGOBRPGStore(config.GetRPGIndexPath(projectRoot))
@@ -926,7 +926,7 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 			featureExtractor = rpg.NewLocalExtractor()
 		}
 
-		rpgIndexer = rpg.NewRPGIndexer(rpgStore, featureExtractor, projectRoot, rpg.RPGIndexerConfig{
+		rpgEncoder = rpg.NewRPGEncoder(rpgStore, featureExtractor, projectRoot, rpg.RPGEncoderConfig{
 			DriftThreshold:       cfg.RPG.DriftThreshold,
 			MaxTraversalDepth:    cfg.RPG.MaxTraversalDepth,
 			FeatureGroupStrategy: cfg.RPG.FeatureGroupStrategy,
@@ -956,8 +956,8 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 		}
 	}
 
-	if rpgIndexer != nil {
-		if err := rpgIndexer.BuildFull(ctx, symbolStore, st); err != nil {
+	if rpgEncoder != nil {
+		if err := rpgEncoder.BuildFull(ctx, symbolStore, st, nil); err != nil {
 			log.Printf("Warning: failed to build RPG graph for %s: %v", projectRoot, err)
 		} else {
 			rpgStats := rpgStore.GetGraph().Stats()
@@ -990,18 +990,18 @@ func watchProject(ctx context.Context, projectRoot string, emb embedder.Embedder
 	}
 
 	// Run watch loop (responds to ctx.Done() for graceful shutdown)
-	return runProjectWatchLoop(ctx, st, symbolStore, w, idx, scanner, extractor, rpgIndexer, rpgStore, tracedLanguages, projectRoot, cfg)
+	return runProjectWatchLoop(ctx, st, symbolStore, w, idx, scanner, extractor, rpgEncoder, rpgStore, tracedLanguages, projectRoot, cfg)
 }
 
-func runProjectWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.GOBSymbolStore, w *watcher.Watcher, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, rpgIndexer *rpg.RPGIndexer, rpgStore rpg.RPGStore, tracedLanguages []string, projectRoot string, cfg *config.Config) error {
+func runProjectWatchLoop(ctx context.Context, st store.VectorStore, symbolStore *trace.GOBSymbolStore, w *watcher.Watcher, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, rpgEncoder *rpg.RPGEncoder, rpgStore rpg.RPGStore, tracedLanguages []string, projectRoot string, cfg *config.Config) error {
 	persistTicker := time.NewTicker(30 * time.Second)
 	defer persistTicker.Stop()
 
 	var lastConfigWrite time.Time
 	var rpgManager *rpgRealtimeManager
-	if rpgIndexer != nil && rpgStore != nil {
+	if rpgEncoder != nil && rpgStore != nil {
 		rpgManager = newRPGRealtimeManager(cfg.Watch.RPGMaxDirtyFilesPerBatch)
-		startRPGRealtimeWorkers(ctx, projectRoot, symbolStore, rpgIndexer, rpgStore, cfg.Watch, rpgManager)
+		startRPGRealtimeWorkers(ctx, projectRoot, symbolStore, rpgEncoder, rpgStore, cfg.Watch, rpgManager)
 	}
 
 	for {
@@ -1034,7 +1034,7 @@ func runProjectWatchLoop(ctx context.Context, st store.VectorStore, symbolStore 
 			}
 
 		case event := <-w.Events():
-			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, rpgIndexer, st, tracedLanguages, projectRoot, cfg, &lastConfigWrite, rpgManager, event)
+			handleFileEvent(ctx, idx, scanner, extractor, symbolStore, rpgEncoder, st, tracedLanguages, projectRoot, cfg, &lastConfigWrite, rpgManager, event)
 		}
 	}
 }
@@ -1293,7 +1293,7 @@ func runWatchForeground() error {
 	return g.Wait()
 }
 
-func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, rpgIndexer *rpg.RPGIndexer, vectorStore store.VectorStore, enabledLanguages []string, projectRoot string, cfg *config.Config, lastConfigWrite *time.Time, rpgManager *rpgRealtimeManager, event watcher.FileEvent) {
+func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer.Scanner, extractor *trace.RegexExtractor, symbolStore *trace.GOBSymbolStore, rpgEncoder *rpg.RPGEncoder, vectorStore store.VectorStore, enabledLanguages []string, projectRoot string, cfg *config.Config, lastConfigWrite *time.Time, rpgManager *rpgRealtimeManager, event watcher.FileEvent) {
 	log.Printf("[%s] %s", event.Type, event.Path)
 
 	switch event.Type {
@@ -1347,17 +1347,17 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 				log.Printf("Extracted %d symbols from %s", len(symbols), event.Path)
 
 				// Update RPG graph.
-				if rpgIndexer != nil {
+				if rpgEncoder != nil {
 					eventType := "create"
 					if event.Type == watcher.EventModify {
 						eventType = "modify"
 					}
-					if err := rpgIndexer.HandleFileEvent(ctx, eventType, fileInfo.Path, symbols); err != nil {
+					if err := rpgEncoder.HandleFileEvent(ctx, eventType, fileInfo.Path, symbols); err != nil {
 						log.Printf("Warning: failed to update RPG for %s: %v", event.Path, err)
 					}
 					if vectorStore != nil {
 						if chunks, err := vectorStore.GetChunksForFile(ctx, fileInfo.Path); err == nil {
-							if err := rpgIndexer.LinkChunksForFile(ctx, fileInfo.Path, chunks); err != nil {
+							if err := rpgEncoder.LinkChunksForFile(ctx, fileInfo.Path, chunks); err != nil {
 								log.Printf("Warning: failed to link RPG chunks for %s: %v", event.Path, err)
 							}
 						}
@@ -1386,8 +1386,8 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 		if err := symbolStore.DeleteFile(ctx, event.Path); err != nil {
 			log.Printf("Failed to remove symbols for %s: %v", event.Path, err)
 		}
-		if rpgIndexer != nil {
-			if err := rpgIndexer.HandleFileEvent(ctx, "delete", event.Path, nil); err != nil {
+		if rpgEncoder != nil {
+			if err := rpgEncoder.HandleFileEvent(ctx, "delete", event.Path, nil); err != nil {
 				log.Printf("Warning: failed to update RPG for deleted %s: %v", event.Path, err)
 			} else if rpgManager != nil {
 				rpgManager.MarkFileDirty(event.Path)
@@ -1829,7 +1829,7 @@ func runWorkspaceWatchForeground(logDir string, ws *config.Workspace) error {
 				runtime.scanner,
 				runtime.extractor,
 				runtime.symbolStore,
-				runtime.rpgIndexer,
+				runtime.rpgEncoder,
 				runtime.vectorStore,
 				runtime.tracedLanguages,
 				runtime.project.Path,
@@ -1854,7 +1854,7 @@ type workspaceProjectRuntime struct {
 	scanner         *indexer.Scanner
 	extractor       *trace.RegexExtractor
 	symbolStore     *trace.GOBSymbolStore
-	rpgIndexer      *rpg.RPGIndexer
+	rpgEncoder      *rpg.RPGEncoder
 	rpgStore        rpg.RPGStore
 	vectorStore     store.VectorStore
 	tracedLanguages []string
@@ -1912,7 +1912,7 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 	}
 
 	var rpgStore rpg.RPGStore
-	var rpgIndexer *rpg.RPGIndexer
+	var rpgEncoder *rpg.RPGEncoder
 	var manager *rpgRealtimeManager
 	if projectCfg.RPG.Enabled {
 		rpgStore = rpg.NewGOBRPGStore(config.GetRPGIndexPath(project.Path))
@@ -1939,12 +1939,12 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 			featureExtractor = rpg.NewLocalExtractor()
 		}
 
-		rpgIndexer = rpg.NewRPGIndexer(rpgStore, featureExtractor, project.Path, rpg.RPGIndexerConfig{
+		rpgEncoder = rpg.NewRPGEncoder(rpgStore, featureExtractor, project.Path, rpg.RPGEncoderConfig{
 			DriftThreshold:       projectCfg.RPG.DriftThreshold,
 			MaxTraversalDepth:    projectCfg.RPG.MaxTraversalDepth,
 			FeatureGroupStrategy: projectCfg.RPG.FeatureGroupStrategy,
 		})
-		if err := rpgIndexer.BuildFull(ctx, symbolStore, vectorStore); err != nil {
+		if err := rpgEncoder.BuildFull(ctx, symbolStore, vectorStore, nil); err != nil {
 			log.Printf("Warning: failed to build RPG graph for %s: %v", project.Path, err)
 		}
 		if err := rpgStore.Persist(ctx); err != nil {
@@ -1952,7 +1952,7 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 		}
 
 		manager = newRPGRealtimeManager(projectCfg.Watch.RPGMaxDirtyFilesPerBatch)
-		startRPGRealtimeWorkers(ctx, fmt.Sprintf("workspace:%s/%s", ws.Name, project.Name), symbolStore, rpgIndexer, rpgStore, projectCfg.Watch, manager)
+		startRPGRealtimeWorkers(ctx, fmt.Sprintf("workspace:%s/%s", ws.Name, project.Name), symbolStore, rpgEncoder, rpgStore, projectCfg.Watch, manager)
 	}
 
 	w, err := watcher.NewWatcher(project.Path, ignoreMatcher, projectCfg.Watch.DebounceMs)
@@ -1979,7 +1979,7 @@ func initializeWorkspaceRuntime(ctx context.Context, ws *config.Workspace, proje
 		scanner:         scanner,
 		extractor:       extractor,
 		symbolStore:     symbolStore,
-		rpgIndexer:      rpgIndexer,
+		rpgEncoder:      rpgEncoder,
 		rpgStore:        rpgStore,
 		vectorStore:     vectorStore,
 		tracedLanguages: tracedLanguages,

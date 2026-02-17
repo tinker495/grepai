@@ -71,20 +71,26 @@ func TestHandleAdd(t *testing.T) {
 		t.Fatal("Category node should be created")
 	}
 
-	// Verify file -> category edge
-	fileEdges := g.GetOutgoing(fileNode.ID)
+	subcatNode := g.GetNode("subcat:cli/server/request")
+	if subcatNode == nil {
+		t.Fatal("Subcategory node should be created")
+	}
+
+	// Verify subcategory -> file edge (parent -> child)
+	fileIncoming := g.GetIncoming(fileNode.ID)
 	hasFeatureParent := false
-	for _, e := range fileEdges {
-		if e.Type == EdgeFeatureParent && e.To == catNode.ID {
+	for _, e := range fileIncoming {
+		if e.Type == EdgeFeatureParent && e.From == subcatNode.ID {
 			hasFeatureParent = true
 			break
 		}
 	}
 	if !hasFeatureParent {
-		t.Error("File should have EdgeFeatureParent to category")
+		t.Error("File should have incoming EdgeFeatureParent from subcategory")
 	}
 
 	// Verify file -> symbol edge
+	fileEdges := g.GetOutgoing(fileNode.ID)
 	hasContains := false
 	for _, e := range fileEdges {
 		if e.Type == EdgeContains && (e.To == sym1Node.ID || e.To == sym2Node.ID) {
@@ -140,7 +146,7 @@ func TestHandleDelete(t *testing.T) {
 
 	// Area, category, and subcategory should be pruned if orphaned
 	// (in this test, they should be pruned since there are no other files)
-	if g.GetNode("subcat:cli/server/handle") != nil {
+	if g.GetNode("subcat:cli/server/request") != nil {
 		t.Error("Orphaned subcategory should be pruned")
 	}
 }
@@ -212,73 +218,90 @@ func TestHandleModify(t *testing.T) {
 		t.Error("New symbol should be added")
 	}
 
-	// Ensure we did actual drift-based removal/recreation
 	_ = originalFeature
 	_ = initialCount
+
+	fileNode := g.GetNode("file:server.go")
+	if fileNode == nil {
+		t.Fatal("file node should exist")
+	}
+	hasOperateParent := false
+	for _, e := range g.GetIncoming(fileNode.ID) {
+		if e.Type == EdgeFeatureParent && e.From == "subcat:root/server/operate" {
+			hasOperateParent = true
+			break
+		}
+	}
+	if !hasOperateParent {
+		t.Error("file should be re-routed to operate subcategory after high drift")
+	}
+	if g.GetNode("subcat:root/server/request") != nil {
+		t.Error("old request subcategory should be pruned after reroute")
+	}
 }
 
 func TestCalculateDrift(t *testing.T) {
 	tests := []struct {
 		name        string
-		oldFeature  string
-		newFeature  string
+		oldFeatures []string
+		newFeatures []string
 		expected    float64
 		description string
 	}{
 		{
 			name:        "identical",
-			oldFeature:  "handle-request",
-			newFeature:  "handle-request",
+			oldFeatures: []string{"handle request"},
+			newFeatures: []string{"handle request"},
 			expected:    0.0,
 			description: "same strings should have zero drift",
 		},
 		{
 			name:        "completely different",
-			oldFeature:  "handle-request",
-			newFeature:  "validate-token",
+			oldFeatures: []string{"handle request"},
+			newFeatures: []string{"validate token"},
 			expected:    1.0,
 			description: "no overlapping words",
 		},
 		{
 			name:        "partial overlap",
-			oldFeature:  "handle-request",
-			newFeature:  "handle-response",
+			oldFeatures: []string{"handle request"},
+			newFeatures: []string{"handle response"},
 			expected:    0.667,
 			description: "one word in common (handle) out of 3 unique words, jaccard distance = 1 - 1/3 = 0.667",
 		},
 		{
 			name:        "empty old",
-			oldFeature:  "",
-			newFeature:  "handle-request",
+			oldFeatures: nil,
+			newFeatures: []string{"handle request"},
 			expected:    1.0,
 			description: "empty string treated as completely different",
 		},
 		{
 			name:        "empty new",
-			oldFeature:  "handle-request",
-			newFeature:  "",
+			oldFeatures: []string{"handle request"},
+			newFeatures: nil,
 			expected:    1.0,
 			description: "empty string treated as completely different",
 		},
 		{
 			name:        "both empty",
-			oldFeature:  "",
-			newFeature:  "",
+			oldFeatures: nil,
+			newFeatures: nil,
 			expected:    0.0,
 			description: "both empty returns 0.0 per implementation",
 		},
 		{
-			name:        "with receiver",
-			oldFeature:  "handle-request@server",
-			newFeature:  "handle-request@client",
-			expected:    0.5,
-			description: "handle and request overlap, server and client don't (2/4 = 0.5, distance = 1-0.5 = 0.5)",
+			name:        "multi feature set",
+			oldFeatures: []string{"handle request", "validate token"},
+			newFeatures: []string{"handle request", "parse config"},
+			expected:    0.667,
+			description: "intersection 2 words (handle/request) over union 6 words",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := calculateDrift(tt.oldFeature, tt.newFeature)
+			result := calculateDrift(tt.oldFeatures, tt.newFeatures)
 			if result != tt.expected {
 				t.Errorf("Expected drift %.3f, got %.3f (%s)", tt.expected, result, tt.description)
 			}
@@ -391,14 +414,14 @@ func TestCollectFeatureParents(t *testing.T) {
 
 	node := &Node{ID: "sym1", Kind: KindSymbol}
 	parent1 := &Node{ID: "subcat1", Kind: KindSubcategory}
-	parent2 := &Node{ID: "cat1", Kind: KindCategory}
+	parent2 := &Node{ID: "file1", Kind: KindFile}
 
 	g.AddNode(node)
 	g.AddNode(parent1)
 	g.AddNode(parent2)
 
-	g.AddEdge(&Edge{From: "sym1", To: "subcat1", Type: EdgeFeatureParent})
-	g.AddEdge(&Edge{From: "sym1", To: "cat1", Type: EdgeContains}) // Should not be collected
+	g.AddEdge(&Edge{From: "subcat1", To: "sym1", Type: EdgeFeatureParent})
+	g.AddEdge(&Edge{From: "file1", To: "sym1", Type: EdgeContains}) // Should not be collected
 
 	parents := collectFeatureParents(g, "sym1")
 
@@ -408,7 +431,7 @@ func TestCollectFeatureParents(t *testing.T) {
 	if !parents["subcat1"] {
 		t.Error("Should have collected subcat1")
 	}
-	if parents["cat1"] {
-		t.Error("Should not have collected cat1 (wrong edge type)")
+	if parents["file1"] {
+		t.Error("Should not have collected file1 (wrong edge type)")
 	}
 }

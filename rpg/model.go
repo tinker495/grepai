@@ -7,34 +7,43 @@ import (
 )
 
 // NodeKind represents the type of node in the RPG graph.
+// NodeKind distinguishes between implementation nodes and hierarchy nodes.
+// In paper terms:
+// - V_L (Low-level): File, Symbol, Chunk
+// - V_H (High-level): Area, Category, Subcategory
 type NodeKind string
 
 const (
-	KindArea        NodeKind = "area"        // functional area (top level)
-	KindCategory    NodeKind = "category"    // category within an area
-	KindSubcategory NodeKind = "subcategory" // subcategory within a category
-	KindFile        NodeKind = "file"        // source file
-	KindSymbol      NodeKind = "symbol"      // function/method/class/type
-	KindChunk       NodeKind = "chunk"       // vector chunk reference
+	KindArea        NodeKind = "area"        // functional area (top level) [V_H]
+	KindCategory    NodeKind = "category"    // category within an area [V_H]
+	KindSubcategory NodeKind = "subcategory" // subcategory within a category [V_H]
+	KindFile        NodeKind = "file"        // source file [V_L]
+	KindSymbol      NodeKind = "symbol"      // function/method/class/type [V_L]
+	KindChunk       NodeKind = "chunk"       // vector chunk reference [V_L]
 )
 
 // EdgeType represents the type of relationship between nodes.
+// EdgeType defines the relationship between nodes.
+// In paper terms:
+// - E_feature (Functional): EdgeFeatureParent, EdgeContains
+// - E_dep (Dependency): EdgeInvokes, EdgeImports, EdgeSemanticSim
 type EdgeType string
 
 const (
-	EdgeFeatureParent EdgeType = "feature_parent" // child -> parent in hierarchy
-	EdgeContains      EdgeType = "contains"       // file contains symbol
-	EdgeInvokes       EdgeType = "invokes"        // symbol calls symbol
-	EdgeImports       EdgeType = "imports"        // file imports file/package
-	EdgeMapsToChunk   EdgeType = "maps_to_chunk"  // symbol maps to vector chunk
-	EdgeSemanticSim   EdgeType = "semantic_sim"   // symbols with similar features/co-call patterns
+	EdgeFeatureParent EdgeType = "feature_parent" // parent -> child in feature hierarchy [E_feature]
+	EdgeContains      EdgeType = "contains"       // container -> contained implementation (file -> symbol) [E_feature]
+	EdgeInvokes       EdgeType = "invokes"        // symbol calls symbol [E_dep]
+	EdgeImports       EdgeType = "imports"        // file imports file/package [E_dep]
+	EdgeMapsToChunk   EdgeType = "maps_to_chunk"  // symbol maps to vector chunk [Implementation]
+	EdgeSemanticSim   EdgeType = "semantic_sim"   // symbols with similar features/co-call patterns [Implementation]
 )
 
 // Node represents a node in the RPG graph.
 type Node struct {
 	ID            string    `json:"id"`
 	Kind          NodeKind  `json:"kind"`
-	Feature       string    `json:"feature"`               // semantic feature label (verb-object)
+	Feature       string    `json:"feature"`               // primary semantic feature label (kebab-case)
+	Features      []string  `json:"features,omitempty"`    // atomic semantic features (verb-object phrases)
 	Path          string    `json:"path,omitempty"`        // file path (for file/symbol/chunk nodes)
 	SymbolName    string    `json:"symbol_name,omitempty"` // symbol name (for symbol nodes)
 	Receiver      string    `json:"receiver,omitempty"`    // Go receiver type
@@ -44,6 +53,7 @@ type Node struct {
 	Signature     string    `json:"signature,omitempty"`      // function signature
 	ChunkID       string    `json:"chunk_id,omitempty"`       // linked vector chunk ID
 	SemanticLabel string    `json:"semantic_label,omitempty"` // enriched label with semantic context
+	Summary       string    `json:"summary,omitempty"`        // high-level semantic summary (LLM generated)
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 

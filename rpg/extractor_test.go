@@ -47,19 +47,19 @@ func TestLocalExtractor_ExtractFeature(t *testing.T) {
 			name:       "with receiver",
 			symbolName: "Save",
 			receiver:   "Config",
-			expected:   "save@config",
+			expected:   "save",
 		},
 		{
 			name:       "with pointer receiver",
 			symbolName: "Load",
 			receiver:   "*Database",
-			expected:   "load@database",
+			expected:   "load",
 		},
 		{
 			name:       "verb-object with receiver",
 			symbolName: "HandleRequest",
 			receiver:   "Server",
-			expected:   "handle-request@server",
+			expected:   "handle-request",
 		},
 		{
 			name:       "long name capped at 4 words",
@@ -211,5 +211,17 @@ func TestLocalExtractor_Mode(t *testing.T) {
 	ext := NewLocalExtractor()
 	if ext.Mode() != "local" {
 		t.Errorf("Expected mode 'local', got '%s'", ext.Mode())
+	}
+}
+
+func TestLocalExtractor_ExtractAtomicFeatures(t *testing.T) {
+	ext := NewLocalExtractor()
+
+	features := ext.ExtractAtomicFeatures("HandleRequest", "", "Server", "")
+	if len(features) != 1 {
+		t.Fatalf("Expected 1 atomic feature, got %d", len(features))
+	}
+	if features[0] != "handle request" {
+		t.Fatalf("Expected \"handle request\", got %q", features[0])
 	}
 }

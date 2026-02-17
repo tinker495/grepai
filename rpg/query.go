@@ -160,8 +160,7 @@ func (qe *QueryEngine) FetchNode(_ context.Context, req FetchNodeRequest) (*Fetc
 		Outgoing:    qe.graph.GetOutgoing(node.ID),
 	}
 
-	// Build hierarchy chain by walking upward through EdgeFeatureParent
-	// and EdgeContains edges.
+	// Build hierarchy chain by walking upward through parent links.
 	visited := make(map[string]bool)
 	current := node.ID
 	for {
@@ -178,18 +177,10 @@ func (qe *QueryEngine) FetchNode(_ context.Context, req FetchNodeRequest) (*Fetc
 		current = parentID
 	}
 
-	// Collect children: nodes connected via outgoing EdgeContains, and
-	// nodes that have EdgeFeatureParent pointing to this node.
+	// Collect direct children via outgoing hierarchy/containment edges.
 	for _, e := range qe.graph.GetOutgoing(node.ID) {
-		if e.Type == EdgeContains {
+		if e.Type == EdgeContains || e.Type == EdgeFeatureParent {
 			if child := qe.graph.GetNode(e.To); child != nil {
-				result.Children = append(result.Children, child)
-			}
-		}
-	}
-	for _, e := range qe.graph.GetIncoming(node.ID) {
-		if e.Type == EdgeFeatureParent || e.Type == EdgeContains {
-			if child := qe.graph.GetNode(e.From); child != nil {
 				result.Children = append(result.Children, child)
 			}
 		}
@@ -304,7 +295,7 @@ func (qe *QueryEngine) Explore(_ context.Context, req ExploreRequest) (*ExploreR
 
 // getFeaturePath returns the full feature path for a node.
 // Hierarchy nodes (area/category/subcategory) already store their full path in Feature.
-// Non-hierarchy nodes (symbol/file/chunk) get their path from their hierarchy parent.
+// File nodes use incoming feature-parent links, symbol nodes inherit file path.
 func (qe *QueryEngine) getFeaturePath(nodeID string) string {
 	node := qe.graph.GetNode(nodeID)
 	if node == nil {
@@ -316,12 +307,40 @@ func (qe *QueryEngine) getFeaturePath(nodeID string) string {
 		return node.Feature
 	}
 
-	// For non-hierarchy nodes, find the first hierarchy parent
-	for _, e := range qe.graph.GetOutgoing(nodeID) {
-		if e.Type == EdgeFeatureParent {
-			parent := qe.graph.GetNode(e.To)
+	if node.Kind == KindFile {
+		for _, e := range qe.graph.GetIncoming(nodeID) {
+			if e.Type != EdgeFeatureParent {
+				continue
+			}
+			parent := qe.graph.GetNode(e.From)
 			if parent != nil {
 				return parent.Feature
+			}
+		}
+		return ""
+	}
+
+	if node.Kind == KindSymbol {
+		for _, e := range qe.graph.GetIncoming(nodeID) {
+			if e.Type != EdgeContains {
+				continue
+			}
+			fileNode := qe.graph.GetNode(e.From)
+			if fileNode != nil && fileNode.Kind == KindFile {
+				return qe.getFeaturePath(fileNode.ID)
+			}
+		}
+		return ""
+	}
+
+	if node.Kind == KindChunk {
+		for _, e := range qe.graph.GetIncoming(nodeID) {
+			if e.Type != EdgeMapsToChunk {
+				continue
+			}
+			symNode := qe.graph.GetNode(e.From)
+			if symNode != nil && symNode.Kind == KindSymbol {
+				return qe.getFeaturePath(symNode.ID)
 			}
 		}
 	}
@@ -330,23 +349,35 @@ func (qe *QueryEngine) getFeaturePath(nodeID string) string {
 }
 
 // findParentID finds the hierarchy parent of a node by looking at outgoing
-// EdgeFeatureParent and EdgeContains edges.
+// incoming EdgeFeatureParent and EdgeContains edges.
 func findParentID(g *Graph, nodeID string) string {
-	for _, e := range g.GetOutgoing(nodeID) {
-		if e.Type == EdgeFeatureParent || e.Type == EdgeContains {
-			return e.To
+	// Hierarchy/file parent links.
+	for _, e := range g.GetIncoming(nodeID) {
+		if e.Type == EdgeFeatureParent {
+			return e.From
+		}
+	}
+	// Symbol/file containment parent links.
+	for _, e := range g.GetIncoming(nodeID) {
+		if e.Type == EdgeContains {
+			return e.From
 		}
 	}
 	return ""
 }
 
 // scoreMatch computes Jaccard similarity between query words and the combined
-// word set from a node's Feature label and SymbolName.
+// word set from node features and SymbolName.
 func scoreMatch(queryWords []string, node *Node) float64 {
-	// Build the node word set from feature and symbol name.
+	// Build the node word set from primary/atomic features and symbol name.
 	nodeWordSet := make(map[string]bool)
 	for _, w := range normalizeWords(node.Feature) {
 		nodeWordSet[w] = true
+	}
+	for _, feature := range node.Features {
+		for _, w := range normalizeWords(feature) {
+			nodeWordSet[w] = true
+		}
 	}
 	for _, w := range normalizeWords(node.SymbolName) {
 		nodeWordSet[w] = true
