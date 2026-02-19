@@ -3,6 +3,7 @@ package cli
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 )
@@ -80,5 +81,50 @@ func TestSaveWatchLogDirHint_StoresAbsolutePath(t *testing.T) {
 	}
 	if !filepath.IsAbs(hinted) {
 		t.Fatalf("hinted log dir should be absolute: %q", hinted)
+	}
+}
+
+func TestResolveWatcherRuntimeStatus_WorktreeFallsBackToLegacyPID(t *testing.T) {
+	tmpHome := t.TempDir()
+	cleanupHome := setTestHomeDirCLI(t, tmpHome)
+	defer cleanupHome()
+
+	projectRoot := t.TempDir()
+	customLogDir := t.TempDir()
+
+	initGitRepoCmd := exec.Command("git", "init", projectRoot)
+	if output, err := initGitRepoCmd.CombinedOutput(); err != nil {
+		t.Fatalf("git init failed: %v (%s)", err, string(output))
+	}
+
+	if err := saveWatchLogDirHint(projectRoot, customLogDir); err != nil {
+		t.Fatalf("saveWatchLogDirHint() failed: %v", err)
+	}
+
+	pidPath := filepath.Join(customLogDir, "grepai-watch.pid")
+	if err := os.WriteFile(pidPath, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0600); err != nil {
+		t.Fatalf("failed to write legacy pid file: %v", err)
+	}
+
+	originalWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() failed: %v", err)
+	}
+	defer func() {
+		_ = os.Chdir(originalWD)
+	}()
+	if err := os.Chdir(projectRoot); err != nil {
+		t.Fatalf("Chdir() failed: %v", err)
+	}
+
+	status := resolveWatcherRuntimeStatus(projectRoot)
+	if !status.running {
+		t.Fatalf("expected running status from legacy pid fallback, got %+v", status)
+	}
+	if status.pid != os.Getpid() {
+		t.Fatalf("pid = %d, want %d", status.pid, os.Getpid())
+	}
+	if filepath.Clean(status.logFile) != filepath.Join(filepath.Clean(customLogDir), "grepai-watch.log") {
+		t.Fatalf("logFile = %q, want %q", status.logFile, filepath.Join(customLogDir, "grepai-watch.log"))
 	}
 }

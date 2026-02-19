@@ -466,9 +466,17 @@ func resolveWatcherRuntimeStatus(projectRoot string) watcherRuntimeStatus {
 		status.worktreeID = worktreeID
 		if worktreeID != "" {
 			pid, _ := daemon.GetRunningWorktreePID(logDir, worktreeID)
+			logFile := daemon.GetWorktreeLogFile(logDir, worktreeID)
+			if pid == 0 {
+				legacyPID, _ := daemon.GetRunningPID(logDir)
+				if legacyPID > 0 {
+					pid = legacyPID
+					logFile = filepath.Join(logDir, "grepai-watch.log")
+				}
+			}
 			status.pid = pid
 			status.running = pid > 0
-			status.logFile = daemon.GetWorktreeLogFile(logDir, worktreeID)
+			status.logFile = logFile
 		} else {
 			pid, _ := daemon.GetRunningPID(logDir)
 			status.pid = pid

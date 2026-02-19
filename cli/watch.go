@@ -42,6 +42,7 @@ var (
 	watchUseUISelector         = shouldUseWatchUI
 	watchForegroundRunner      = runWatchForeground
 	watchForegroundUIRunner    = runWatchForegroundUI
+	watchStopDaemonRunner      = stopWatchDaemon
 )
 
 var watchCmd = &cobra.Command{
@@ -135,10 +136,22 @@ func runWatch(cmd *cobra.Command, args []string) error {
 
 	// Handle --stop flag
 	if watchStop {
-		if err := stopWatchDaemon(logDir, worktreeID); err != nil {
+		projectRoot, rootErr := config.FindProjectRoot()
+		stopLogDirs := []string{logDir}
+		if watchLogDir == "" && rootErr == nil {
+			if candidates, err := resolveWatcherCandidateLogDirs(projectRoot); err == nil && len(candidates) > 0 {
+				stopLogDirs = candidates
+			}
+		}
+		stopped, _, err := stopWatchAcrossLogDirs(stopLogDirs, worktreeID, watchStopDaemonRunner)
+		if err != nil {
 			return err
 		}
-		if projectRoot, rootErr := config.FindProjectRoot(); rootErr == nil {
+		if !stopped {
+			fmt.Println("No background watcher is running")
+			return nil
+		}
+		if rootErr == nil {
 			_ = clearWatchLogDirHint(projectRoot)
 		}
 		return nil
@@ -226,7 +239,27 @@ func showWatchStatus(logDir, worktreeID string) error {
 	return nil
 }
 
-func stopWatchDaemon(logDir, worktreeID string) error {
+func stopWatchAcrossLogDirs(logDirs []string, worktreeID string, stopFn func(string, string) (bool, error)) (bool, string, error) {
+	seen := make(map[string]bool, len(logDirs))
+	for _, logDir := range logDirs {
+		cleanLogDir := filepath.Clean(logDir)
+		if seen[cleanLogDir] {
+			continue
+		}
+		seen[cleanLogDir] = true
+
+		stopped, err := stopFn(cleanLogDir, worktreeID)
+		if err != nil {
+			return false, "", err
+		}
+		if stopped {
+			return true, cleanLogDir, nil
+		}
+	}
+	return false, "", nil
+}
+
+func stopWatchDaemon(logDir, worktreeID string) (bool, error) {
 	// Get running PID (automatically cleans up stale PIDs)
 	var pid int
 	var err error
@@ -241,17 +274,16 @@ func stopWatchDaemon(logDir, worktreeID string) error {
 	}
 
 	if err != nil {
-		return fmt.Errorf("failed to read PID file: %w", err)
+		return false, fmt.Errorf("failed to read PID file: %w", err)
 	}
 
 	if pid == 0 {
-		fmt.Println("No background watcher is running")
-		return nil
+		return false, nil
 	}
 
 	fmt.Printf("Stopping background watcher (PID %d)...\n", pid)
 	if err := daemon.StopProcess(pid); err != nil {
-		return fmt.Errorf("failed to stop process: %w", err)
+		return false, fmt.Errorf("failed to stop process: %w", err)
 	}
 
 	// Wait for process to stop with timeout
@@ -276,23 +308,23 @@ func stopWatchDaemon(logDir, worktreeID string) error {
 
 	// Verify the process actually stopped
 	if daemon.IsProcessRunning(pid) {
-		return fmt.Errorf("process did not stop within %v\nStill running? Try: kill -9 %d\nOr check logs at: %s",
+		return false, fmt.Errorf("process did not stop within %v\nStill running? Try: kill -9 %d\nOr check logs at: %s",
 			shutdownTimeout, pid, logFile)
 	}
 
 	// Clean up PID file
 	if worktreeID != "" {
 		if err := daemon.RemoveWorktreePIDFile(logDir, worktreeID); err != nil {
-			return fmt.Errorf("failed to remove PID file: %w", err)
+			return false, fmt.Errorf("failed to remove PID file: %w", err)
 		}
 	} else {
 		if err := daemon.RemovePIDFile(logDir); err != nil {
-			return fmt.Errorf("failed to remove PID file: %w", err)
+			return false, fmt.Errorf("failed to remove PID file: %w", err)
 		}
 	}
 
 	fmt.Println("Background watcher stopped")
-	return nil
+	return true, nil
 }
 
 func startBackgroundWatch(logDir, worktreeID string) error {
@@ -1032,7 +1064,7 @@ func watchProjectWithEventObserver(ctx context.Context, projectRoot string, emb 
 		}
 	}
 
-	emitInitialStatsSnapshot(ctx, st, symbolStore, onStats)
+	emitInitialStatsSnapshot(ctx, st, symbolStore, projectRoot, onStats)
 
 	if err := st.Persist(ctx); err != nil {
 		log.Printf("Warning: failed to persist index: %v", err)
@@ -1062,7 +1094,7 @@ func watchProjectWithEventObserver(ctx context.Context, projectRoot string, emb 
 	return runProjectWatchLoop(ctx, st, symbolStore, w, idx, scanner, extractor, rpgIndexer, rpgStore, tracedLanguages, projectRoot, cfg, onEvent, onActivity, onStats)
 }
 
-func emitInitialStatsSnapshot(ctx context.Context, vectorStore store.VectorStore, symbolStore trace.SymbolStore, onStats watchStatsObserver) {
+func emitInitialStatsSnapshot(ctx context.Context, vectorStore store.VectorStore, symbolStore trace.SymbolStore, projectRoot string, onStats watchStatsObserver) {
 	if onStats == nil {
 		return
 	}
@@ -1091,7 +1123,8 @@ func emitInitialStatsSnapshot(ctx context.Context, vectorStore store.VectorStore
 	}
 
 	if hasSnapshot {
-		onStats(delta)
+		delta.Snapshot = true
+		onStats(projectRoot, delta)
 	}
 }
 
@@ -1363,10 +1396,11 @@ type watchStatsDelta struct {
 	ChunksRemoved int
 	SymbolsFound  int
 	SymbolsLost   int
+	Snapshot      bool
 }
 
 type watchActivityObserver func(state, file string)
-type watchStatsObserver func(delta watchStatsDelta)
+type watchStatsObserver func(projectRoot string, delta watchStatsDelta)
 
 func runDynamicWatchSupervisor(ctx context.Context, mainRoot string, emb embedder.Embedder, opts ...dynamicWatchSupervisorOption) error {
 	cfg := newDynamicWatchSupervisorConfig()
@@ -2018,7 +2052,7 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 			if !fileExisted {
 				delta.FilesIndexed = 1
 			}
-			onStats(delta)
+			onStats(projectRoot, delta)
 		}
 
 		// Update last_index_time with throttling (only write if 30 seconds have passed)
@@ -2043,7 +2077,7 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 				log.Printf("Extracted %d symbols from %s", len(symbols), event.Path)
 
 				if onStats != nil {
-					onStats(watchStatsDelta{
+					onStats(projectRoot, watchStatsDelta{
 						SymbolsFound: len(symbols),
 						SymbolsLost:  oldSymbolCount,
 					})
@@ -2091,7 +2125,7 @@ func handleFileEvent(ctx context.Context, idx *indexer.Indexer, scanner *indexer
 		}
 
 		if onStats != nil {
-			onStats(watchStatsDelta{
+			onStats(projectRoot, watchStatsDelta{
 				FilesRemoved:  1,
 				ChunksRemoved: oldChunkCount,
 				SymbolsLost:   oldSymbolCount,

@@ -110,7 +110,8 @@ type watchUIActivityMsg struct {
 }
 
 type watchUIStatsMsg struct {
-	delta watchStatsDelta
+	projectRoot string
+	delta       watchStatsDelta
 }
 
 type watchUIModel struct {
@@ -141,6 +142,7 @@ type watchUIModel struct {
 	chunksCreated int
 	filesRemoved  int
 	symbolCount   int
+	snapshots     map[string]watchStatsDelta
 
 	totalEvents int
 	lastSuccess time.Time
@@ -187,6 +189,7 @@ func newWatchUIModel(cancel context.CancelFunc) watchUIModel {
 		started:       time.Now(),
 		ledger:        newLedgerModel(theme),
 		progress:      newProgressModel(theme),
+		snapshots:     make(map[string]watchStatsDelta),
 	}
 }
 
@@ -317,10 +320,11 @@ func (m watchUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.currentActivity = activity
 
 	case watchUIStatsMsg:
-		m.filesIndexed += msg.delta.FilesIndexed
-		m.filesRemoved += msg.delta.FilesRemoved
-		m.chunksCreated += msg.delta.ChunksCreated - msg.delta.ChunksRemoved
-		m.symbolCount += msg.delta.SymbolsFound - msg.delta.SymbolsLost
+		if msg.delta.Snapshot {
+			m.applySnapshotStats(msg.projectRoot, msg.delta)
+		} else {
+			m.applyIncrementalStats(msg.delta)
+		}
 
 	case watchUIScopeMsg:
 		if msg.totalProjects < 1 {
@@ -372,6 +376,35 @@ func (m watchUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *watchUIModel) applyIncrementalStats(delta watchStatsDelta) {
+	m.filesIndexed += delta.FilesIndexed
+	m.filesRemoved += delta.FilesRemoved
+	m.chunksCreated += delta.ChunksCreated - delta.ChunksRemoved
+	m.symbolCount += delta.SymbolsFound - delta.SymbolsLost
+}
+
+func (m *watchUIModel) applySnapshotStats(projectRoot string, delta watchStatsDelta) {
+	root := projectRoot
+	if root == "" {
+		root = m.projectRoot
+	}
+	if root == "" {
+		// Fallback to incremental semantics when no source is available.
+		m.applyIncrementalStats(delta)
+		return
+	}
+
+	if prev, ok := m.snapshots[root]; ok {
+		m.filesIndexed -= prev.FilesIndexed
+		m.filesRemoved -= prev.FilesRemoved
+		m.chunksCreated -= prev.ChunksCreated - prev.ChunksRemoved
+		m.symbolCount -= prev.SymbolsFound - prev.SymbolsLost
+	}
+
+	m.applyIncrementalStats(delta)
+	m.snapshots[root] = delta
 }
 
 func (m *watchUIModel) recalculateLayout() {
@@ -1144,9 +1177,10 @@ func runWatchUIWorker(ctx context.Context, p *tea.Program) (err error) {
 				file:  file,
 			})
 		}),
-		withWatchSupervisorStatsObserver(func(delta watchStatsDelta) {
+		withWatchSupervisorStatsObserver(func(projectRoot string, delta watchStatsDelta) {
 			p.Send(watchUIStatsMsg{
-				delta: delta,
+				projectRoot: projectRoot,
+				delta:       delta,
 			})
 		}),
 	)

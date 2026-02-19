@@ -533,7 +533,7 @@ func TestEmitInitialStatsSnapshot_ReportsExistingTotals(t *testing.T) {
 
 	var got watchStatsDelta
 	calls := 0
-	emitInitialStatsSnapshot(ctx, vecStore, symbolStore, func(delta watchStatsDelta) {
+	emitInitialStatsSnapshot(ctx, vecStore, symbolStore, projectRoot, func(_ string, delta watchStatsDelta) {
 		calls++
 		got = delta
 	})
@@ -546,5 +546,8 @@ func TestEmitInitialStatsSnapshot_ReportsExistingTotals(t *testing.T) {
 	}
 	if got.SymbolsFound != 2 {
 		t.Fatalf("symbols found = %d, want 2", got.SymbolsFound)
+	}
+	if !got.Snapshot {
+		t.Fatal("expected snapshot delta to be marked as Snapshot")
 	}
 }
