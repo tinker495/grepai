@@ -18,14 +18,18 @@ const (
 	SymbolIndexFileName = "symbols.gob"
 	RPGIndexFileName    = "rpg.gob"
 
-	DefaultEmbedderProvider       = "ollama"
-	DefaultOllamaEmbeddingModel   = "nomic-embed-text"
-	DefaultLMStudioEmbeddingModel = "text-embedding-nomic-embed-text-v1.5"
-	DefaultOpenAIEmbeddingModel   = "text-embedding-3-small"
+	DefaultEmbedderProvider         = "ollama"
+	DefaultOllamaEmbeddingModel     = "nomic-embed-text"
+	DefaultLMStudioEmbeddingModel   = "text-embedding-nomic-embed-text-v1.5"
+	DefaultOpenAIEmbeddingModel     = "text-embedding-3-small"
+	DefaultSyntheticEmbeddingModel  = "hf:nomic-ai/nomic-embed-text-v1.5"
+	DefaultOpenRouterEmbeddingModel = "openai/text-embedding-3-small"
 
-	DefaultOllamaEndpoint   = "http://localhost:11434"
-	DefaultLMStudioEndpoint = "http://127.0.0.1:1234"
-	DefaultOpenAIEndpoint   = "https://api.openai.com/v1"
+	DefaultOllamaEndpoint     = "http://localhost:11434"
+	DefaultLMStudioEndpoint   = "http://127.0.0.1:1234"
+	DefaultOpenAIEndpoint     = "https://api.openai.com/v1"
+	DefaultSyntheticEndpoint  = "https://api.synthetic.new/openai/v1"
+	DefaultOpenRouterEndpoint = "https://openrouter.ai/api/v1"
 
 	DefaultLocalEmbeddingDimensions = 768
 	DefaultOpenAIDimensions         = 1536
@@ -89,7 +93,7 @@ type BoostRule struct {
 }
 
 type EmbedderConfig struct {
-	Provider    string `yaml:"provider"` // ollama | lmstudio | openai
+	Provider    string `yaml:"provider"` // ollama | lmstudio | openai | synthetic | openrouter
 	Model       string `yaml:"model"`
 	Endpoint    string `yaml:"endpoint,omitempty"`
 	APIKey      string `yaml:"api_key,omitempty"`
@@ -98,14 +102,14 @@ type EmbedderConfig struct {
 }
 
 // GetDimensions returns the configured dimensions or a default value.
-// For OpenAI, defaults to 1536 (text-embedding-3-small).
-// For Ollama/LMStudio, defaults to 768 (nomic-embed-text).
+// For OpenAI/OpenRouter, defaults to 1536 (text-embedding-3-small).
+// For Ollama/LMStudio/Synthetic, defaults to 768 (nomic-embed-text-v1.5).
 func (e *EmbedderConfig) GetDimensions() int {
 	if e.Dimensions != nil {
 		return *e.Dimensions
 	}
 	switch e.Provider {
-	case "openai":
+	case "openai", "openrouter":
 		return DefaultOpenAIDimensions
 	default:
 		return DefaultLocalEmbeddingDimensions
@@ -114,6 +118,21 @@ func (e *EmbedderConfig) GetDimensions() int {
 
 func DefaultEmbedderForProvider(provider string) EmbedderConfig {
 	switch provider {
+	case "synthetic":
+		dim := DefaultLocalEmbeddingDimensions
+		return EmbedderConfig{
+			Provider:   "synthetic",
+			Model:      DefaultSyntheticEmbeddingModel,
+			Endpoint:   DefaultSyntheticEndpoint,
+			Dimensions: &dim,
+		}
+	case "openrouter":
+		return EmbedderConfig{
+			Provider:   "openrouter",
+			Model:      DefaultOpenRouterEmbeddingModel,
+			Endpoint:   DefaultOpenRouterEndpoint,
+			Dimensions: nil,
+		}
 	case "lmstudio":
 		dim := DefaultLocalEmbeddingDimensions
 		return EmbedderConfig{
@@ -418,8 +437,8 @@ func (c *Config) applyDefaults() {
 		c.Embedder.Endpoint = DefaultEmbedderForProvider(c.Embedder.Provider).Endpoint
 	}
 
-	// Only set default dimensions for local embedders (Ollama, LMStudio).
-	// For OpenAI, leave nil to let the API use the model's native dimensions.
+	// Only set default dimensions for local embedders.
+	// For OpenAI/OpenRouter, leave nil to let the API use the model's native dimensions.
 	if c.Embedder.Dimensions == nil {
 		switch cfg := DefaultEmbedderForProvider(c.Embedder.Provider); {
 		case cfg.Dimensions != nil:
