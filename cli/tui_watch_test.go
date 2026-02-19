@@ -262,6 +262,52 @@ func TestWatchUIModelScopeUpdatesOnAddRemove(t *testing.T) {
 	}
 }
 
+func TestWatchUIModelRemoveSessionClearsStatsContribution(t *testing.T) {
+	m := newWatchUIModel(nil)
+
+	next, _ := m.Update(watchUIContextMsg{projectRoot: "/tmp/main"})
+	m = next.(watchUIModel)
+
+	next, _ = m.Update(watchUIStatsMsg{
+		projectRoot: "/tmp/main",
+		delta: watchStatsDelta{
+			Snapshot:      true,
+			FilesIndexed:  10,
+			ChunksCreated: 100,
+			SymbolsFound:  40,
+		},
+	})
+	m = next.(watchUIModel)
+
+	next, _ = m.Update(watchUIStatsMsg{
+		projectRoot: "/tmp/wt-a",
+		delta: watchStatsDelta{
+			Snapshot:      true,
+			FilesIndexed:  3,
+			ChunksCreated: 15,
+			SymbolsFound:  6,
+		},
+	})
+	m = next.(watchUIModel)
+
+	if m.filesIndexed != 13 || m.chunksCreated != 115 || m.symbolCount != 46 {
+		t.Fatalf("unexpected aggregate before remove: files=%d chunks=%d symbols=%d", m.filesIndexed, m.chunksCreated, m.symbolCount)
+	}
+
+	next, _ = m.Update(watchUISessionMsg{projectRoot: "/tmp/wt-a", state: "removed", note: "deleted"})
+	m = next.(watchUIModel)
+
+	if m.filesIndexed != 10 || m.chunksCreated != 100 || m.symbolCount != 40 {
+		t.Fatalf("removed session contribution not cleared: files=%d chunks=%d symbols=%d", m.filesIndexed, m.chunksCreated, m.symbolCount)
+	}
+	if _, ok := m.snapshots["/tmp/wt-a"]; ok {
+		t.Fatal("removed session snapshot should be cleared")
+	}
+	if _, ok := m.snapshotDrift["/tmp/wt-a"]; ok {
+		t.Fatal("removed session drift should be cleared")
+	}
+}
+
 func TestWatchUIModelRemovedSessionPrunesAfterTTL(t *testing.T) {
 	m := newWatchUIModel(nil)
 
@@ -345,6 +391,18 @@ func TestWatchUIModelLedgerPanelFiltersByFocusedSession(t *testing.T) {
 	unfiltered := m.ledger.renderContent()
 	if !strings.Contains(unfiltered, "main event") {
 		t.Fatalf("all-session ledger should include main events: %q", unfiltered)
+	}
+}
+
+func TestWatchUIModelRenderProgressPanelDoesNotShowSkipped(t *testing.T) {
+	m := newWatchUIModel(nil)
+	m.width = 100
+	m.height = 40
+	m.recalculateLayout()
+
+	panel := m.renderProgressPanel(80, 12)
+	if strings.Contains(panel, "skipped=") {
+		t.Fatalf("progress panel should not show skipped count: %q", panel)
 	}
 }
 

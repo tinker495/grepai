@@ -59,13 +59,6 @@ type watchUIRPGMsg struct {
 	total   int
 }
 
-type watchUISummaryMsg struct {
-	filesIndexed  int
-	filesSkipped  int
-	chunksCreated int
-	filesRemoved  int
-}
-
 type watchUISymbolMsg struct {
 	count int
 }
@@ -138,7 +131,6 @@ type watchUIModel struct {
 
 	// Stats
 	filesIndexed  int
-	filesSkipped  int
 	chunksCreated int
 	filesRemoved  int
 	symbolCount   int
@@ -279,12 +271,6 @@ func (m watchUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Actually RPG is built from symbols.
 			m.currentStep = 3
 		}
-
-	case watchUISummaryMsg:
-		m.filesIndexed = msg.filesIndexed
-		m.filesSkipped = msg.filesSkipped
-		m.chunksCreated = msg.chunksCreated
-		m.filesRemoved = msg.filesRemoved
 
 	case watchUISymbolMsg:
 		m.symbolCount = msg.count
@@ -441,6 +427,22 @@ func (m *watchUIModel) applySnapshotStats(projectRoot string, delta watchStatsDe
 	delete(m.snapshotDrift, root)
 }
 
+func (m *watchUIModel) clearProjectStats(projectRoot string) {
+	if projectRoot == "" {
+		return
+	}
+
+	if snapshot, ok := m.snapshots[projectRoot]; ok {
+		m.applySnapshotContribution(snapshot, -1)
+		delete(m.snapshots, projectRoot)
+	}
+
+	if drift, ok := m.snapshotDrift[projectRoot]; ok {
+		m.applySnapshotContribution(drift, -1)
+		delete(m.snapshotDrift, projectRoot)
+	}
+}
+
 func (m *watchUIModel) recalculateLayout() {
 	if m.width <= 0 || m.height <= 0 {
 		return
@@ -518,6 +520,7 @@ func (m *watchUIModel) upsertSession(projectRoot, state, note string) {
 	session.note = note
 	session.updatedAt = time.Now()
 	if state == "removed" {
+		m.clearProjectStats(projectRoot)
 		session.removedAt = session.updatedAt
 	} else {
 		session.removedAt = time.Time{}
@@ -604,6 +607,7 @@ func (m *watchUIModel) pruneRemovedSessions(now time.Time) bool {
 	}
 
 	for root := range removed {
+		m.clearProjectStats(root)
 		delete(m.sessions, root)
 	}
 	filtered := make([]string, 0, len(m.sessionOrder))
@@ -726,8 +730,8 @@ func (m watchUIModel) renderProgressPanel(width, height int) string {
 	// Add other stats
 	lines = append(lines,
 		m.theme.text.Render(fmt.Sprintf("Symbol: %d extracted", m.symbolCount)),
-		m.theme.text.Render(fmt.Sprintf("Stats: indexed=%d chunks=%d removed=%d skipped=%d",
-			m.filesIndexed, m.chunksCreated, m.filesRemoved, m.filesSkipped)),
+		m.theme.text.Render(fmt.Sprintf("Stats: indexed=%d chunks=%d removed=%d",
+			m.filesIndexed, m.chunksCreated, m.filesRemoved)),
 	)
 
 	if m.scanFile != "" {
