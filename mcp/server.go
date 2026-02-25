@@ -5,6 +5,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -1575,7 +1576,10 @@ func (s *Server) handleIndexStatus(ctx context.Context, request mcp.CallToolRequ
 	}
 
 	// Check RPG status
-	rpgSt, _, _ := s.tryLoadRPG(ctx)
+	rpgSt, _, rpgErr := s.tryLoadRPG(ctx)
+	if rpgErr != nil && !errors.Is(rpgErr, rpg.ErrRPGIndexOutdated) {
+		log.Printf("Warning: failed to load RPG status: %v", rpgErr)
+	}
 	if rpgSt != nil {
 		status.RPGEnabled = true
 		rpgStats := rpgSt.GetGraph().Stats()
@@ -1801,6 +1805,9 @@ func (s *Server) tryLoadRPG(ctx context.Context) (rpg.RPGStore, *rpg.QueryEngine
 	}
 	rpgStore := rpg.NewGOBRPGStore(config.GetRPGIndexPath(s.projectRoot))
 	if err := rpgStore.Load(ctx); err != nil {
+		if errors.Is(err, rpg.ErrRPGIndexOutdated) {
+			return nil, nil, rpg.ErrRPGIndexOutdated
+		}
 		return nil, nil, fmt.Errorf("failed to load RPG store: %w", err)
 	}
 	graph := rpgStore.GetGraph()
@@ -1830,7 +1837,13 @@ func (s *Server) handleRPGSearch(ctx context.Context, request mcp.CallToolReques
 	}
 
 	// Load RPG
-	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	rpgSt, qe, loadErr := s.tryLoadRPG(ctx)
+	if errors.Is(loadErr, rpg.ErrRPGIndexOutdated) {
+		return mcp.NewToolResultError("RPG index is outdated; run 'grepai watch' to rebuild"), nil
+	}
+	if loadErr != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to load RPG: %v", loadErr)), nil
+	}
 	if rpgSt == nil {
 		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
 	}
@@ -1899,7 +1912,13 @@ func (s *Server) handleRPGFetch(ctx context.Context, request mcp.CallToolRequest
 	}
 
 	// Load RPG
-	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	rpgSt, qe, loadErr := s.tryLoadRPG(ctx)
+	if errors.Is(loadErr, rpg.ErrRPGIndexOutdated) {
+		return mcp.NewToolResultError("RPG index is outdated; run 'grepai watch' to rebuild"), nil
+	}
+	if loadErr != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to load RPG: %v", loadErr)), nil
+	}
 	if rpgSt == nil {
 		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
 	}
@@ -1948,7 +1967,13 @@ func (s *Server) handleRPGExplore(ctx context.Context, request mcp.CallToolReque
 	}
 
 	// Load RPG
-	rpgSt, qe, _ := s.tryLoadRPG(ctx)
+	rpgSt, qe, loadErr := s.tryLoadRPG(ctx)
+	if errors.Is(loadErr, rpg.ErrRPGIndexOutdated) {
+		return mcp.NewToolResultError("RPG index is outdated; run 'grepai watch' to rebuild"), nil
+	}
+	if loadErr != nil {
+		return mcp.NewToolResultError(fmt.Sprintf("failed to load RPG: %v", loadErr)), nil
+	}
 	if rpgSt == nil {
 		return mcp.NewToolResultError("RPG is not enabled or index is empty"), nil
 	}
